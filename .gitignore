@@ -1,0 +1,18 @@
+__pycache__/
+*.pyc
+.venv/
+.env/
+dist/
+build/
+*.egg-info/
+*_chunks*/
+*_chunks_Corrected*/
+_logs/
+*.ok.json
+*.inprogress
+qc/report/
+*.sam
+*.tmp
+
+# editor swap files
+*.swp

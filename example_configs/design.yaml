@@ -1,0 +1,7 @@
+# If omitted at runtime, demux defaults to per-well (group=well)
+plates:
+  - name: Plate_A
+    wells: {A01: A_A, A02: B_B}
+samples:
+  - name: Pool1
+    wells: [PlateA:A01, PlateA:A02]

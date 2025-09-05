@@ -1,0 +1,26 @@
+title: "scifi-ATAC QC"
+custom_data:
+  step1_library:
+    file_format: "tsv"
+    section_name: "Step 1 — Library Intake"
+    plot_type: "table"
+    fn: "qc/step1_summary/*.step1.library.tsv"
+  step1_groups:
+    file_format: "tsv"
+    section_name: "Step 1 — Demux by Group"
+    plot_type: "table"
+    fn: "qc/step1_summary/*.step1.groups.tsv"
+  step2:
+    file_format: "tsv"
+    section_name: "Step 2 — Map & Clean"
+    plot_type: "table"
+    fn: "qc/step2_summary/*.step2.tsv"
+sp:
+  step1_groups:
+    assigned_pairs: {title: "Assigned", format: "{:,.0f}"}
+    frac_assigned: {title: "Frac Assigned", format: "{:.3f}"}
+  step2:
+    dup_fraction: {title: "Dup Frac", format: "{:.2f}"}
+    final_pairs: {title: "Final Pairs", format: "{:,.0f}"}
+    final_fraction_of_input: {title: "Final/Input", format: "{:.3f}"}
+extra_fn_clean_exts: [".step1.library.tsv", ".step1.groups.tsv", ".step2.tsv"]
