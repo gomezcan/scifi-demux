@@ -1,7 +1,19 @@
 # If omitted at runtime, demux defaults to per-well (group=well)
 plates:
-  - name: Plate_A
-    wells: {A01: A_A, A02: B_B}
+- name: PlateA
+index: i7_A
+wells:
+A01: ATCGTAGC
+A02: CGTATGCA
+- name: PlateB
+index: i7_B
+wells:
+A01: TGCATGCA
+B12: GATCTGAC
+
+
 samples:
-  - name: Pool1
-    wells: [PlateA:A01, PlateA:A02]
+- name: Seedling_Heat
+wells: [PlateA:A01, PlateB:B12]
+- name: Seedling_Control
+wells: [PlateA:A02]
