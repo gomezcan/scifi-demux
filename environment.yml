@@ -1,0 +1,15 @@
+# environment.yml
+name: scifi-demux
+channels: [conda-forge, bioconda]
+dependencies:
+  - python=3.11
+  - umi_tools
+  - cutadapt
+  - seqkit
+  - samtools
+  - bwa
+  - picard
+  - pigz
+  - parallel
+  - multiqc
+  # (python deps are installed via pip from the project)
