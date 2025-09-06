@@ -7,6 +7,41 @@
 - Strategy plug‑ins so you can drop in custom logic without changing the CLI.
 - HPC-friendly features: chunking, SLURM templating, resumable outputs, structured logs.
 
+## Installation
+
+We recommend using conda/mamba so you get the bioinformatics tools (UMI-tools, cutadapt, bwa, samtools, picard, seqkit, GNU parallel, MultiQC) alongside the Python CLI.
+
+### Option A — Fresh environment (recommended)
+
+#### 1) Configure channels (once):
+
+```
+conda config --add channels conda-forge
+conda config --add channels bioconda
+conda config --set channel_priority strict
+```
+
+#### 2) Create and activate the env (fast with mamba):
+
+```
+# If you have mamba:
+mamba create -n scifi-demux \
+  python=3.11 umi_tools cutadapt seqkit samtools bwa picard pigz parallel multiqc -y
+conda activate scifi-demux
+```
+
+```
+# If you only have conda:
+conda create -n scifi-demux \
+  python=3.11 umi_tools cutadapt seqkit samtools bwa picard pigz parallel multiqc -y
+conda activate scifi-demux
+```
+
+#### 3) Install this package (editable dev mode):
+
+```
+pip install -e .
+```
 
 ## Quick start
 
