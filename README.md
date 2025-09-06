@@ -1,6 +1,6 @@
 # scifi-demux
 
-A thin, typed, CLI wrapper around your existing **renaming** and **demultiplexing** scripts for scifi‑ATAC FASTQ processing. Provides:
+**demultiplexing** scripts for scifi‑ATAC FASTQ processing. Provides:
 
 - One command (`scifi-demux ...`) with subcommands for `rename` and `demux`.
 - YAML config with validation (Pydantic) for plate layouts, well barcodes, and sample design.
