@@ -1,9 +1,0 @@
-src/scifi_demux/cli/main.py         # Typer app, modes, global options
-src/scifi_demux/exec/local.py       # LocalExecutor (GNU parallel control)
-src/scifi_demux/exec/hpc.py         # HPCExecutor (SLURM arrays, plan files)
-src/scifi_demux/utils/logging.py    # rich logging, progress
-src/scifi_demux/utils/state.py      # sentinels, state DB (JSON)
-src/scifi_demux/utils/fs.py         # atomic writes, path helpers
-src/scifi_demux/steps/step1.py      # A: UMI extract; B: cutadapt; C/D: demux+merge
-src/scifi_demux/steps/step2.py      # index→map→clean chain (8 sub-steps)
-src/scifi_demux/qc/collectors.py    # make the step1/step2 TSVs
