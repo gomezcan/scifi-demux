@@ -20,3 +20,8 @@ scifi-demux = "scifi_demux.cli.main:app"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/scifi_demux"]
+
+[tool.hatch.build]
+include = [
+  "src/scifi_demux/__data/**",
+]
