@@ -130,11 +130,3 @@ multiqc --config qc/multiqc_scifi.yaml --outdir qc/report .
 - If **no design** is provided, demux defaults to **per-well** outputs. 
 
 
-
-
-
-
-
-
---out /path/demux_samples
-```
