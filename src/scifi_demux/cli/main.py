@@ -1,17 +1,26 @@
 from __future__ import annotations
-import sys
 import os
 from pathlib import Path
-from typing import Optional, List
+from typing import Optional
 import typer
 from rich.table import Table
 from rich.console import Console
 
 from scifi_demux.utils.logging import setup_logging
-from scifi_demux.steps.step1 import(
+from scifi_demux.utils.state import (
+    STATE_PATH_DEFAULT,
+    load_state,
+    save_state,
+    ensure_state,
+    add_or_get_task,
+    iter_tasks,
+)
+from scifi_demux.steps.step1 import (
     run_step1_local,
-    run_step1_hpc,
+    run_step1_hpc,      # plan-only; may follow+merge
     worker_chunk,
+    report_missing_chunks,
+    merge_library,
 )
 
 app = typer.Typer(add_completion=False, help="scifi‑ATAC: Step 1 (demux) and Step 2 (map+clean) with resume")
@@ -47,35 +56,33 @@ def status(state: Path = typer.Option(STATE_PATH_DEFAULT, help="Path to pipeline
 
 
 # -----------------------------
-# Step 1 (Demux) — sinlgle-command
+# Step 1 (Demux) unified runner + worker
 # -----------------------------
 step1_app = typer.Typer(help="Step 1: UMI → cutadapt → demux (chunk worker), then merge")
 app.add_typer(step1_app, name="step1")
 
 @step1_app.command("run")
 def step1_run(
-    library: str = typer.Option(..., help="Library name / FASTQ prefix"),
-    raw_dir: Path = typer.Option(Path("."), help="Directory with raw FASTQs {lib}_R1.fastq.gz, {lib}_R3.fastq.gz"),
+    library: str = typer.Option(..., help="Library / FASTQ prefix"),
+    raw_dir: Path = typer.Option(Path("."), help="Dir with {lib}_R1.fastq.gz & {lib}_R3.fastq.gz"),
     design: Optional[Path] = typer.Option(None, help="PlateDesign_*.txt; omit for per-well outputs"),
     layout: str = typer.Option("builtin", help="Tn5 layout file or 'builtin'"),
     mode: str = typer.Option("local", help="local|hpc"),
+    # local fan-out
     threads: int = typer.Option(8, help="LOCAL: number of chunks & parallel workers"),
-    chunks: Optional[int] = typer.Option(None, help="HPC: total chunks (defaults to threads if omitted)"),
-    threads_per_chunk: int = typer.Option(1, help="HPC: cpus-per-task used inside each worker"),
-    array_limit: int = typer.Option(0, help="HPC: limit concurrent array tasks (0 = no limit)"),
-    submit: bool = typer.Option(False, help="HPC: submit array+merge via sbatch"),
-    partition: str = typer.Option("standard", help="HPC: partition"),
-    time: str = typer.Option("12:00:00", help="HPC: walltime"),
-    mem: str = typer.Option("24G", help="HPC: memory per task"),
+    # hpc planning/following
+    chunks: Optional[int] = typer.Option(None, help="HPC: total chunks (defaults to --threads if omitted)"),
+    follow: bool = typer.Option(False, help="HPC: poll for completion and auto-merge when done (no job submission)"),
+    poll_interval: int = typer.Option(60, help="HPC: seconds between progress checks (default: 60)"),
+    max_wait: str = typer.Option("auto", help="HPC: maximum wait time (e.g., 12h, 3600s). 'auto' = use scheduler job time if detectable; 0 = unlimited"),
 ):
-    """Run Step 1 end‑to‑end with internal planning.
+    """Run Step 1 with internal planning.
 
-    LOCAL: split into `threads` chunks, run N workers in parallel (1 thread per chunk), then merge.
-    HPC:   create a plan for `chunks` (or `threads` if chunks unset), render a single worker array; optionally submit; merge is dependency‑chained.
+    LOCAL: split into `threads` chunks, run workers via GNU parallel, then merge.
+    HPC:   plan only; print worker command. With --follow, poll sentinels and merge when complete.
     """
     setup_logging(1)
     if mode == "local":
-        # auto: chunks = threads; worker uses 1 thread internally
         return run_step1_local(
             library=library,
             raw_dir=raw_dir,
@@ -86,22 +93,27 @@ def step1_run(
         )
     elif mode == "hpc":
         if chunks is None:
-            chunks = threads  # user-friendly default
-        return run_step1_hpc(
+            chunks = threads
+        plan_path = run_step1_hpc(
             library=library,
             raw_dir=raw_dir,
             design=design,
             layout=layout,
             chunks=chunks,
-            threads_per_chunk=threads_per_chunk,
-            array_limit=array_limit,
-            submit=submit,
-            partition=partition,
-            time=time,
-            mem=mem,
+            follow=follow,
+            poll_interval=poll_interval,
+            max_wait=max_wait,
+        )
+        console.print(f"[bold]Planned[/]: {plan_path}")
+        console.print(
+            "Launch your array jobs separately. Each task runs:
+            "
+            f"scifi-demux step1 worker-chunk --plan {plan_path} --mode hpc"
+            + (f" --design {design}" if design else "")
         )
     else:
         raise typer.BadParameter("mode must be 'local' or 'hpc'")
+
 
 # -----------------------------
 # Step 1: single chunk worker (UMI → cutadapt → demux)
@@ -122,6 +134,22 @@ def step1_worker_chunk(
     if array_id < 1:
         raise typer.BadParameter("array_id not provided and no known ARRAY env var found")
     worker_chunk(plan=plan, idx=array_id, layout=layout, design=design, mode=mode)
+
+@step1_app.command("check")
+def step1_check(work_root: Path = typer.Option(..., help="<LIB>_work directory")):
+    missing = report_missing_chunks(work_root)
+    if missing:
+        console.print(f"[red]Missing demux sentinels for chunks[/]: {', '.join(map(str, missing))}")
+        raise typer.Exit(1)
+    console.print("[green]All chunk demux sentinels present. Safe to merge.")
+
+
+@step1_app.command("missing-indices")
+def step1_missing_indices(work_root: Path = typer.Option(..., help="<LIB>_work directory")):
+    missing = report_missing_chunks(work_root)
+    if not missing:
+        return
+    typer.echo(",".join(str(i) for i in missing))
 
 # -----------------------------
 # Step 2 (Map+Clean)
