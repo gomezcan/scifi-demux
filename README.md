@@ -46,13 +46,32 @@ conda activate scifi-demux
 # With conda:
 conda create -n scifi-demux python=3.11 umi_tools cutadapt seqkit samtools bwa picard pigz parallel multiqc -y
 conda activate scifi-demux
+```
 
+```
+# or used environment.yml
+conda env create -n scifi-demux -f environment.yml
+conda activate scifi-demux
 ```
 
 #### 3) Install the Python package (editable dev mode):
 
 ```
 pip install -e .
+```
+
+### Option B — Install into an existing conda env
+```
+conda activate <your-env>
+# (optional) add channels once per machine
+conda config --add channels conda-forge
+conda config --add channels bioconda
+conda config --set channel_priority strict
+
+# install (from the repo you cloned)
+pip install -e /path/to/ambientmapper
+# or straight from GitHub
+pip install "git+https://github.com/gomezcan/ambientmapper.git"
 ```
 
 #### 4) Verify the install
@@ -64,8 +83,7 @@ bwa 2>&1 | head -1
 parallel --version | head -1
 multiqc --version
 
-### Option B — Use environment.yml (optional)
-[]
+
 
 ## Quick start
 
