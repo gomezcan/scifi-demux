@@ -11,55 +11,13 @@ from .slurm import render_slurm
 
 app = typer.Typer(add_completion=False, help="scifi‑ATAC FASTQ renaming & demultiplexing wrapper")
 
-
 @app.callback()
+# Define a callback function that runs before any command
 def _main(
     verbose: int = typer.Option(0, "-v", count=True, help="-v/-vv for more logs"),
 ):
+    """This callback runs before any command and sets up logging based on verbosity."""
     setup_logging(verbose)
-
-@step2_app.command("worker")
-def step2_worker(
-    plan: Path = typer.Option(..., exists=True, help="run_plan.map.tsv"),
-    array_id: int = typer.Option(-1, help="1-based row index; if -1, read from env"),
-    threads_per_task: int = typer.Option(24),
-    tn5_bcs: str = typer.Option("builtin"),
-    whitelist: str = typer.Option("builtin"),
-):
-    import os
-    # Resolve index from env if not given
-    if array_id < 0:
-        for var in ("SLURM_ARRAY_TASK_ID", "PBS_ARRAYID", "SGE_TASK_ID", "LSB_JOBINDEX", "ARRAY_ID"):
-            if var in os.environ:
-                array_id = int(os.environ[var])
-                break
-    if array_id < 1:
-        raise typer.BadParameter("array_id not provided and no known ARRAY env var found.")
-    # Read the Nth (1-based) non-comment line
-    with open(plan) as fh:
-        rows = [ln.strip() for ln in fh if ln.strip() and not ln.startswith("#")]
-    if array_id > len(rows):
-        raise typer.BadParameter(f"array_id {array_id} > {len(rows)} rows in plan.")
-    line = rows[array_id - 1]
-    group, genome, ref_path = line.split("\t")[:3]
-
-    # Resolve tn5/whitelist
-    from scifi_demux.io_utils import resolve_tn5_bcs, resolve_whitelist
-    tn5_path = resolve_tn5_bcs(tn5_bcs)
-    wl_path  = resolve_whitelist(whitelist)
-
-    # Hand off to step2 orchestrator to execute this single row
-    from scifi_demux.steps.step2 import run_single_row
-    run_single_row(
-        group=group,
-        genome=genome,
-        ref_path=ref_path,
-        threads=threads_per_task,
-        tn5_bcs_path=str(tn5_path),
-        whitelist_path=str(wl_path),
-        mode="hpc-external",
-    )
-
 
 @ app.command()
 def rename(
@@ -120,3 +78,46 @@ def slurm(
     path = out_dir / f"{job_name}.slurm"
     path.write_text(script)
     typer.echo(str(path))
+
+# @step2_app.command("worker")
+# def step2_worker(
+#     plan: Path = typer.Option(..., exists=True, help="run_plan.map.tsv"),
+#     array_id: int = typer.Option(-1, help="1-based row index; if -1, read from env"),
+#     threads_per_task: int = typer.Option(24),
+#     tn5_bcs: str = typer.Option("builtin"),
+#     whitelist: str = typer.Option("builtin"),
+# ):
+#     import os
+#     # Resolve index from env if not given
+#     if array_id < 0:
+#         for var in ("SLURM_ARRAY_TASK_ID", "PBS_ARRAYID", "SGE_TASK_ID", "LSB_JOBINDEX", "ARRAY_ID"):
+#             if var in os.environ:
+#                 array_id = int(os.environ[var])
+#                 break
+#     if array_id < 1:
+#         raise typer.BadParameter("array_id not provided and no known ARRAY env var found.")
+#     # Read the Nth (1-based) non-comment line
+#     with open(plan) as fh:
+#         rows = [ln.strip() for ln in fh if ln.strip() and not ln.startswith("#")]
+#     if array_id > len(rows):
+#         raise typer.BadParameter(f"array_id {array_id} > {len(rows)} rows in plan.")
+#     line = rows[array_id - 1]
+#     group, genome, ref_path = line.split("\t")[:3]
+
+#     # Resolve tn5/whitelist
+#     from scifi_demux.io_utils import resolve_tn5_bcs, resolve_whitelist
+#     tn5_path = resolve_tn5_bcs(tn5_bcs)
+#     wl_path  = resolve_whitelist(whitelist)
+
+#     # Hand off to step2 orchestrator to execute this single row
+#     from scifi_demux.steps.step2 import run_single_row
+#     run_single_row(
+#         group=group,
+#         genome=genome,
+#         ref_path=ref_path,
+#         threads=threads_per_task,
+#         tn5_bcs_path=str(tn5_path),
+#         whitelist_path=str(wl_path),
+#         mode="hpc-external",
+#     )
+
