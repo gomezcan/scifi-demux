@@ -75,6 +75,7 @@ pip install "git+https://github.com/gomezcan/scifi-demux.git"
 ```
 
 #### 4) Verify the install
+```
 scifi-demux --help
 umi_tools --version
 cutadapt --version
@@ -82,7 +83,7 @@ samtools --version | head -1
 bwa 2>&1 | head -1
 parallel --version | head -1
 multiqc --version
-
+```
 
 
 ## Quick start
