@@ -71,7 +71,7 @@ conda config --set channel_priority strict
 # install (from the repo you cloned)
 pip install -e /path/to/ambientmapper
 # or straight from GitHub
-pip install "git+https://github.com/gomezcan/ambientmapper.git"
+pip install "git+https://github.com/gomezcan/scifi-demux.git"
 ```
 
 #### 4) Verify the install
