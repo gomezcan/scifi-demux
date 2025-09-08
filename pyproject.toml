@@ -7,7 +7,7 @@ name = "scifi-demux"
 version = "0.1.0"
 description = "Wraps renaming and demultiplexing scripts for scifi‑ATAC FASTQ workflows"
 readme = "README.md"
-authors = [{ name = "Your Name", email = "you@example.com" }]
+authors = [{ name = "Fabio Gomez", email = "gomezcan@umich.edu" }]
 license = { file = "LICENSE" }
 requires-python = ">=3.9"
 dependencies = [
