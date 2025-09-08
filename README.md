@@ -1,4 +1,4 @@
-# scifi-demux
+# scifi-demux: Python Package Scaffold For Renaming & Demultiplexing Scifi-ATAC-seq
 
 Chunk-first **demultiplexing** and **mapping/cleaning** for scifi-ATAC FASTQ workflows with:
 
