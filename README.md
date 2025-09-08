@@ -93,17 +93,59 @@ multiqc --version
 >  - "**Step 2**: genome index resolve/build → mapping → 8 cleaning sub-steps → QC"
 
 
-## Step 1 — plan/run (demux pipeline)
+## Step 1 — LOCAL mode end-to-en: plan (split library in chunks) + run demux (assigment pools based on degins ) + merge chunks
 Register a library and plan the run (dry-run shows what will execute):
 
 ```bash
 scifi-demux step1 run \
-  --library SeedlingLib1 \
+  --library SampleExample1 \
+  --raw-dir /path/raw \
+  --design PlateDesign_SampleExample1.txt \
   --mode local \
-  --dry-run
+  --threads 8
+```
+Step 1 will produce `{group}_R1.bc1.bc2.fastq.gz` / `{group}_R3.bc1.bc2.fastq.gz` per **group** = sample/pool from the design file, or per-well if no design is supplied.
+NOTE: In **local** mode, it creates one chunk per thread and launches the same number of threads as workers in parallel, with each thread processing its own chunk. This helps reduce memory usage and processing time.
+
+## Step 1 — HPC mode end-to-en: plan (split library in chunks) + assig external array per chum + run demux (assigment pools based on degins) 
+``
+#!/bin/bash
+########## BATCH Lines for Resource Request ##########
+#SBATCH --time=8:00:00
+#SBATCH --nodes=1
+#SBATCH --ntasks-per-node=1
+#SBATCH --cpus-per-task=16
+#SBATCH --mem=70G
+#SBATCH --job-name=Demux_step1
+#SBATCH --output=_logs/%x-%j.log
+#SBATCH --aarray=16%8 # 16 chunks process 8 at the time
+
+
+conda activate scifi-demux
+
+scifi-demux step1 run \
+  --library SampleExample1 \
+  --raw-dir /path/raw \
+  --design PlateDesign_SampleExample1.txt \
+  --mode hpc \
+  --chunks 50
+# -> emits run_plan.step1.chunks.tsv under SampleExample1_work/
+
+# 2) You submit an array job using your scheduler
+#    the worker will read SLURM_ARRAY_TASK_ID / PBS_ARRAYID / SGE_TASK_ID / LSB_JOBINDEX automatically)
+#    Each task runs:
+#	 
+
+scifi-demux step1 worker-chunk --plan SampleExample1_work/run_plan.step1.chunks.tsv --mode hpc
+
+# 3) After all array tasks finish, merge (barriered)
+scifi-demux step1 merge --library SampleExample1 --work-root SampleExample1_work
+
+# 4) Check completeness before merging
+scifi-demux step1 check --library SampleExample1 --work-root SampleExample1_work
 ```
 
-Step 1 will produce `{group}_R1.bc1.bc2.fastq.gz` / `{group}_R3.bc1.bc2.fastq.gz` per **group** = sample/pool from the design file, or per-well if no design is supplied.
+
 
 ## Step 2 — plan & run mapping/cleaning
 Create a simple TSV describing mapping tasks:
