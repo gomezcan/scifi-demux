@@ -1,5 +1,6 @@
 from __future__ import annotations
 import sys
+import os
 from pathlib import Path
 from typing import Optional, List
 import typer
@@ -7,14 +8,10 @@ from rich.table import Table
 from rich.console import Console
 
 from scifi_demux.utils.logging import setup_logging
-from scifi_demux.utils.state import (
-    STATE_PATH_DEFAULT,
-    load_state,
-    save_state,
-    ensure_state,
-    mark_task_step,
-    add_or_get_task,
-    iter_tasks,
+from scifi_demux.steps.step1 import(
+    run_step1_local,
+    run_step1_hpc,
+    worker_chunk,
 )
 
 app = typer.Typer(add_completion=False, help="scifi‑ATAC: Step 1 (demux) and Step 2 (map+clean) with resume")
@@ -50,28 +47,81 @@ def status(state: Path = typer.Option(STATE_PATH_DEFAULT, help="Path to pipeline
 
 
 # -----------------------------
-# Step 1 (Demux) — minimal stub: registers a library task now; real execution wired next
+# Step 1 (Demux) — sinlgle-command
 # -----------------------------
-step1_app = typer.Typer(help="Step 1: UMI → cutadapt → demux → merge")
+step1_app = typer.Typer(help="Step 1: UMI → cutadapt → demux (chunk worker), then merge")
 app.add_typer(step1_app, name="step1")
 
 @step1_app.command("run")
 def step1_run(
-    library: str = typer.Option(..., help="Library name (prefix of raw FASTQs)"),
+    library: str = typer.Option(..., help="Library name / FASTQ prefix"),
+    raw_dir: Path = typer.Option(Path("."), help="Directory with raw FASTQs {lib}_R1.fastq.gz, {lib}_R3.fastq.gz"),
+    design: Optional[Path] = typer.Option(None, help="PlateDesign_*.txt; omit for per-well outputs"),
+    layout: str = typer.Option("builtin", help="Tn5 layout file or 'builtin'"),
     mode: str = typer.Option("local", help="local|hpc"),
-    state: Path = typer.Option(STATE_PATH_DEFAULT),
-    dry_run: bool = typer.Option(True, help="Plan only for now"),
+    threads: int = typer.Option(8, help="LOCAL: number of chunks & parallel workers"),
+    chunks: Optional[int] = typer.Option(None, help="HPC: total chunks (defaults to threads if omitted)"),
+    threads_per_chunk: int = typer.Option(1, help="HPC: cpus-per-task used inside each worker"),
+    array_limit: int = typer.Option(0, help="HPC: limit concurrent array tasks (0 = no limit)"),
+    submit: bool = typer.Option(False, help="HPC: submit array+merge via sbatch"),
+    partition: str = typer.Option("standard", help="HPC: partition"),
+    time: str = typer.Option("12:00:00", help="HPC: walltime"),
+    mem: str = typer.Option("24G", help="HPC: memory per task"),
 ):
-    s = ensure_state(state)
-    task_id = f"step1:library:{library}"
-    task = add_or_get_task(s, task_id, kind="step1", library=library)
-    # Register canonical step keys for progress tracking
-    for key in ["umi_r1", "umi_r3", "cutadapt", "demux", "merge", "qc"]:
-        task.setdefault("steps", {}).setdefault(key, {"status": "pending"})
-    save_state(s, state)
-    console.print(f"[bold]Registered Step 1 task[/]: {task_id} (mode={mode}, dry_run={dry_run})")
-    console.print("Next: wire actual execution to your scripts in steps/step1.py")
+    """Run Step 1 end‑to‑end with internal planning.
 
+    LOCAL: split into `threads` chunks, run N workers in parallel (1 thread per chunk), then merge.
+    HPC:   create a plan for `chunks` (or `threads` if chunks unset), render a single worker array; optionally submit; merge is dependency‑chained.
+    """
+    setup_logging(1)
+    if mode == "local":
+        # auto: chunks = threads; worker uses 1 thread internally
+        return run_step1_local(
+            library=library,
+            raw_dir=raw_dir,
+            design=design,
+            layout=layout,
+            chunks=threads,
+            parallel_jobs=threads,
+        )
+    elif mode == "hpc":
+        if chunks is None:
+            chunks = threads  # user-friendly default
+        return run_step1_hpc(
+            library=library,
+            raw_dir=raw_dir,
+            design=design,
+            layout=layout,
+            chunks=chunks,
+            threads_per_chunk=threads_per_chunk,
+            array_limit=array_limit,
+            submit=submit,
+            partition=partition,
+            time=time,
+            mem=mem,
+        )
+    else:
+        raise typer.BadParameter("mode must be 'local' or 'hpc'")
+
+# -----------------------------
+# Step 1: single chunk worker (UMI → cutadapt → demux)
+# -----------------------------
+@step1_app.command("worker-chunk")
+def step1_worker_chunk(
+    plan: Path = typer.Option(..., exists=True, help="run_plan.step1.chunks.tsv"),
+    array_id: int = typer.Option(-1, help="1-based row index; if -1, read from env (SLURM/PBS/SGE/LSF)"),
+    layout: str = typer.Option("builtin"),
+    design: Optional[Path] = typer.Option(None),
+    mode: str = typer.Option("local", help="local|hpc (affects threading policy)"),
+):
+    if array_id < 0:
+        for var in ("SLURM_ARRAY_TASK_ID", "PBS_ARRAYID", "SGE_TASK_ID", "LSB_JOBINDEX", "ARRAY_ID"):
+            if var in os.environ:
+                array_id = int(os.environ[var])
+                break
+    if array_id < 1:
+        raise typer.BadParameter("array_id not provided and no known ARRAY env var found")
+    worker_chunk(plan=plan, idx=array_id, layout=layout, design=design, mode=mode)
 
 # -----------------------------
 # Step 2 (Map+Clean)
