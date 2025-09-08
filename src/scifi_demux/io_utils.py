@@ -1,11 +1,25 @@
 from pathlib import Path
 from typing import Iterable
+from importlib.resources import files
+from typing import Optional
 import shutil
+
+def data_path(name: str) -> Path:
+    return Path(files("scifi_demux.__data__") / name)
+
+def resolve_tn5_bcs(user_path: Optional[str]) -> Path:
+    if user_path and user_path.lower() != "builtin":
+        return Path(user_path).resolve()
+    return data_path("tn5_bcs.txt")
+
+def resolve_whitelist(user_path: Optional[str]) -> Path:
+    if user_path and user_path.lower() != "builtin":
+        return Path(user_path).resolve()
+    return data_path("737K-cratac-v1.txt")
 
 def ensure_dir(d: Path) -> Path:
   d.mkdir(parents=True, exist_ok=True)
   return d
-
 
 def find_fastqs(root: Path) -> list[Path]:
   exts = (".fastq", ".fq", ".fastq.gz", ".fq.gz")
@@ -16,7 +30,6 @@ def atomic_symlink(src: Path, dst: Path) -> None:
   if dst.exists() or dst.is_symlink():
     dst.unlink()
     dst.symlink_to(src)
-
 
 def copy_or_link(src: Path, dst: Path, mode: str = "link") -> None:
   if mode == "copy":
