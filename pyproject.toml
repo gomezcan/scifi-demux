@@ -5,6 +5,10 @@ build-backend = "hatchling.build"
 [project]
 name = "scifi-demux"
 version = "0.1.0"
+description = "Wraps renaming and demultiplexing scripts for scifi‑ATAC FASTQ workflows"
+readme = "README.md"
+authors = [{ name = "Your Name", email = "you@example.com" }]
+license = { file = "LICENSE" }
 requires-python = ">=3.9"
 dependencies = [
   "typer>=0.12",
@@ -12,7 +16,6 @@ dependencies = [
   "pyyaml>=6",
   "rich>=13",
   "tqdm>=4",
-  "psutil>=5",
 ]
 
 [project.scripts]
