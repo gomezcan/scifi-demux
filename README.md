@@ -108,7 +108,8 @@ Step 1 will produce `{group}_R1.bc1.bc2.fastq.gz` / `{group}_R3.bc1.bc2.fastq.gz
 NOTE: In **local** mode, it creates one chunk per thread and launches the same number of threads as workers in parallel, with each thread processing its own chunk. This helps reduce memory usage and processing time.
 
 ## Step 1 — HPC mode end-to-en: plan (split library in chunks) + assig external array per chum + run demux (assigment pools based on degins) 
-``
+
+```
 #!/bin/bash
 ########## BATCH Lines for Resource Request ##########
 #SBATCH --time=8:00:00
@@ -119,7 +120,6 @@ NOTE: In **local** mode, it creates one chunk per thread and launches the same n
 #SBATCH --job-name=Demux_step1
 #SBATCH --output=_logs/%x-%j.log
 #SBATCH --aarray=16%8 # 16 chunks process 8 at the time
-
 
 conda activate scifi-demux
 
