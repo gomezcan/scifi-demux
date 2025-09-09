@@ -84,7 +84,7 @@ def step1_run(
     threads: int = typer.Option(8, help="LOCAL: number of chunks & parallel workers"),
     # hpc planning/following
     chunks: Optional[int] = typer.Option(None, help="HPC: total chunks (defaults to --threads if omitted)"),
-    follow: bool = typer.Option(False, help="HPC: poll for completion and auto-merge when done (no job submission)"),
+    follow: bool = typer.Option(False, help="HPC: poll for completion; when all chunks finish, merge and run QC"),
     poll_interval: int = typer.Option(60, help="HPC: seconds between progress checks (default: 60)"),
     max_wait: str = typer.Option("auto", help="HPC: maximum wait time (e.g., 12h, 3600s). 'auto' = use scheduler job time if detectable; 0 = unlimited"),
 ):
