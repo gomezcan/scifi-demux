@@ -7,6 +7,8 @@ from rich.table import Table
 from rich.console import Console
 
 from scifi_demux.utils.logging import setup_logging
+from scifi_demux.steps.step1 import plan_chunks
+
 from scifi_demux.utils.state import (
     STATE_PATH_DEFAULT,
     load_state,
@@ -16,8 +18,9 @@ from scifi_demux.utils.state import (
     iter_tasks,
 )
 from scifi_demux.steps.step1 import (
+    plan_chunks,
     run_step1_local,
-    run_step1_hpc,      # plan-only; may follow+merge
+    run_step1_hpc,
     worker_chunk,
     report_missing_chunks,
     merge_library,
@@ -54,13 +57,23 @@ def status(state: Path = typer.Option(STATE_PATH_DEFAULT, help="Path to pipeline
         table.add_row(t.get("id", "?"), kind, info, f"{done}/{total}")
     console.print(table)
 
-
 # -----------------------------
 # Step 1 (Demux) unified runner + worker
 # -----------------------------
 step1_app = typer.Typer(help="Step 1: UMI → cutadapt → demux (chunk worker), then merge")
 app.add_typer(step1_app, name="step1")
 
+
+@step1_app.command("plan")
+def step1_plan(
+    library: str = typer.Option(...),
+    raw_dir: Path = typer.Option(..., exists=True, file_okay=False),
+    chunks: int = typer.Option(..., help="Number of chunks to split into"),
+):
+    work_root = Path(f"{library}_work")
+    plan = plan_chunks(raw_dir=raw_dir, library=library, work_root=work_root, chunks=chunks)
+    typer.echo(str(plan))
+    
 @step1_app.command("run")
 def step1_run(
     library: str = typer.Option(..., help="Library / FASTQ prefix"),
