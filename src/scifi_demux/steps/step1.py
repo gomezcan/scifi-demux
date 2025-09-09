@@ -1,10 +1,17 @@
 from __future__ import annotations
 from pathlib import Path
 from typing import Optional
-import os, subprocess
+import os, subprocess, shutil  # add shutil
 from scifi_demux.utils.fs import ensure_dir, has_ok, write_ok, atomic_write_text
 from scifi_demux.io_utils import data_path
-from scifi_demux.steps.primitives import merge_demuxed_chunks
+from scifi_demux.io_utils import resolve_layout_path
+
+from scifi_demux.steps.primitives import (
+    umi_extract_pair,              
+    cutadapt_append_tn5_to_name,   
+    demux_by_split_bc,             
+    merge_demuxed_chunks,          
+)
 
 PLAN_NAME = "run_plan.step1.chunks.tsv"
 
@@ -26,24 +33,28 @@ def plan_chunks(raw_dir: Path, library: str, work_root: Path, chunks: int) -> Pa
         subprocess.run([
             "seqkit", "split2", "--by-part", str(chunks), "-1", str(r1), "-2", str(r3), "-O", str(chunks_dir)
         ], check=True)
+    
     # Create plan TSV
-    lines = ["#chunk_id	library	r1_raw_chunk	r3_raw_chunk	out_root"]
+    lines = ["#chunk_id\tlibrary\tr1_raw_chunk\tr3_raw_chunk\tout_root"]
+
     pairs = sorted(chunks_dir.glob("part_*_R1.fastq.gz"))
     for i, r1p in enumerate(pairs, start=1):
         r3p = chunks_dir / r1p.name.replace("_R1", "_R3")
         lines.append(f"{i}	{library}	{r1p}	{r3p}	{work_root}")
-    atomic_write_text(plan_path, "
-".join(lines) + "
+    
+    atomic_write_text(plan_path, "\n".join(lines) + "\n")
+
 )
     return plan_path
 
 
-def worker_chunk(plan: Path, idx: int, layout: str, design: Optional[Path], mode: str = "local") -> None:
+def worker_chunk(plan: Path, idx: int, layout: Optional[str], design: Optional[Path], mode: str = "local") -> None:
     # Read Nth (1-based) row
     rows = [ln.strip() for ln in plan.read_text().splitlines() if ln.strip() and not ln.startswith("#")]
     if idx > len(rows):
         raise IndexError(f"array_id {idx} > plan rows {len(rows)}")
-    chunk_id, library, r1_raw, r3_raw, work_root = rows[idx-1].split("	")
+    
+    chunk_id, library, r1_raw, r3_raw, work_root = rows[idx-1].split("\t")
     chunk_id = int(chunk_id)
     work_root = Path(work_root)
     sent_dir = ensure_dir(work_root / "_sentinels")
