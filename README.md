@@ -7,6 +7,8 @@ Chunk-first **demultiplexing** and **mapping/cleaning** for scifi-ATAC FASTQ wor
 - Resumable, **checkpointed** execution (local with GNU parallel; HPC with SLURM arrays).
 - Built-in **QC summaries** and a ready MultiQC config.
 
+![tests](https://github.com/gomezcan/scifi-demux/actions/workflows/tests.yml/badge.svg)
+
 ## Installation
 
 We recommend using conda/mamba so you get the bioinformatics tools (UMI-tools, cutadapt, bwa, samtools, picard, seqkit, GNU parallel, MultiQC) alongside the Python CLI.
