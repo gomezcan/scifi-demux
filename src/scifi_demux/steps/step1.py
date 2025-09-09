@@ -58,31 +58,37 @@ def worker_chunk(plan: Path, idx: int, layout: str, design: Optional[Path], mode
     r1_bc2 = bc1bc2_dir / f"part_{chunk_id:03d}_R1.bc1.bc2.fastq.gz"
     r3_bc2 = bc1bc2_dir / f"part_{chunk_id:03d}_R3.bc1.bc2.fastq.gz"
 
-    # 1) UMI (skip if done)
+    threads = int(os.environ.get("SLURM_CPUS_PER_TASK") or os.environ.get("NSLOTS") or 1) if mode == "hpc" else 1
+    # 1) UMI
     umi_ok = sent_dir / f"chunk_{chunk_id:03d}.umi.ok.json"
     if not umi_ok.exists():
-        # Call your existing scripts; example:
-        subprocess.run(["bash", "1_1_UMItools.ATAC.R1_parallel.sh", r1_raw, str(r1_bc1)], check=True)
-        subprocess.run(["bash", "1_1_UMItools.ATAC.R3_parallel.sh", r3_raw, str(r3_bc1)], check=True)
-        write_ok(umi_ok, {"chunk": chunk_id, "step": "umi"})
+        # R1 keep, mate=R3
+        umi_extract_pair(read_keep=Path(r1_raw), mate_in=Path(r3_raw), out_fastq_gz=r1_bc1, threads=threads)
+        # R3 keep, mate=R2 if available (your R3 SLURM did this)
+        r2_raw = Path(str(r3_raw).replace("_R3.", "_R2."))
+        if r2_raw.exists():
+            umi_extract_pair(read_keep=Path(r3_raw), mate_in=r2_raw, out_fastq_gz=r3_bc1, threads=threads)
+        else:
+            if not r3_bc1.exists():
+                shutil.copyfile(r3_raw, r3_bc1)
+        write_ok(umi_ok, {"chunk": chunk_id, "step": "umi", "threads": threads})
 
-    # 2) Cutadapt per chunk (skip if done)
+    # 2) Cutadapt
     cut_ok = sent_dir / f"chunk_{chunk_id:03d}.cutadapt.ok.json"
     if not cut_ok.exists():
-        # Example: your cutadapt script might accept -o outputs for each read
-        subprocess.run(["bash", "1_2_Cutadapt.ATAC.sh", str(r1_bc1), str(r3_bc1), str(r1_bc2), str(r3_bc2)], check=True)
-        write_ok(cut_ok, {"chunk": chunk_id, "step": "cutadapt"})
+        cutadapt_append_tn5_to_name(r1_in=r1_bc1, r3_in=r3_bc1, r1_out=r1_bc2, r3_out=r3_bc2, threads=min(threads, 8))
+        write_ok(cut_ok, {"chunk": chunk_id, "step": "cutadapt", "threads": threads})
 
-    # 3) Demux per chunk (skip if done)
+    # 3) Demux for R1 and R3 (paired outputs)
     demux_ok = sent_dir / f"chunk_{chunk_id:03d}.demux.ok.json"
     if not demux_ok.exists():
-        layout_path = data_path("96well_Tn5_bc_layout.txt") if layout == "builtin" else Path(layout)
-        # Shell out to your demux per-chunk runner; pass optional design
-        demux_cmd = ["bash", "2_1_1_fastq_sample_assign_and_fixTn5.ATAC.sh", str(r1_bc2), str(r3_bc2), str(corr_dir), str(layout_path)]
-        if design:
-            demux_cmd.append(str(design))
-        subprocess.run(demux_cmd, check=True)
-        write_ok(demux_ok, {"chunk": chunk_id, "step": "demux"})
+        layout_path = resolve_layout_path(layout)  # None/"builtin" -> packaged 96-well layout
+        if not design:
+            raise ValueError("demux requires --design (sample→wells mapping)")
+        # run for R1 and R3 so merge can write paired per-sample fastqs
+        demux_by_split_bc(layout_file=layout_path, sample_well_map=design, input_fastq_gz=r1_bc2, out_dir=corr_dir)
+        demux_by_split_bc(layout_file=layout_path, sample_well_map=design, input_fastq_gz=r3_bc2, out_dir=corr_dir)
+        write_ok(demux_ok, {"chunk": chunk_id, "step": "demux", "threads": threads})
 
 
 def merge_library(library: str, work_root: Path) -> None:
