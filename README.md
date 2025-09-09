@@ -62,6 +62,11 @@ conda activate scifi-demux
 pip install -e .
 ```
 
+#### uninstall
+```
+pip uninstall scifi-demux
+```
+
 ### Option B — Install into an existing conda env
 ```
 conda activate <your-env>
