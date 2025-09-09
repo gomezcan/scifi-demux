@@ -91,16 +91,6 @@ def worker_chunk(plan: Path, idx: int, layout: str, design: Optional[Path], mode
         write_ok(demux_ok, {"chunk": chunk_id, "step": "demux", "threads": threads})
 
 
-def merge_library(library: str, work_root: Path) -> None:
-    # Ensure all demux sentinels exist
-    sent_dir = work_root / "_sentinels"
-    demux_sents = list(sent_dir.glob("chunk_*.demux.ok.json"))
-    if not demux_sents:
-        raise RuntimeError("No demux sentinels found; have the workers run?")
-    # Your existing merge script expects per-group chunk files in Corrected/
-    subprocess.run(["bash", "3_merge_fastq.ATAC.sh", str(work_root / "Corrected")], check=True)
-
-
 def run_step1_local(library: str, raw_dir: Path, design: Optional[Path], layout: str, chunks: int, parallel_jobs: int) -> None:
     work_root = Path(f"{library}_work")
     plan = plan_chunks(raw_dir=raw_dir, library=library, work_root=work_root, chunks=chunks)
