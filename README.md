@@ -8,6 +8,8 @@ Chunk-first **demultiplexing** and **mapping/cleaning** for scifi-ATAC FASTQ wor
 - Built-in **QC summaries** and a ready MultiQC config.
 
 ![tests](https://github.com/gomezcan/scifi-demux/actions/workflows/tests.yml/badge.svg?branch=main)
+[![PyPI version](https://img.shields.io/pypi/v/scifi-demux.svg)](https://pypi.org/project/scifi-demux/)
+[![Python versions](https://img.shields.io/pypi/pyversions/scifi-demux.svg)](https://pypi.org/project/scifi-demux/)
 
 
 ## Installation
