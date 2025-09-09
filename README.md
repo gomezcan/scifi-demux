@@ -90,7 +90,7 @@ multiqc --version
 #### Uninstall
 
 ```bash
-pip uninstall scifi-demux
+pip uninstall -y scifi-demux
 ```
 
 If you also created a dedicated conda/mamba environment
