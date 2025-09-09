@@ -1,15 +1,18 @@
-# scifi-demux: Python Package Scaffold For Renaming & Demultiplexing Scifi-ATAC-seq
+# scifi-demux: Renaming & Demultiplexing for sci-fi ATAC-seq
 
-Chunk-first **demultiplexing** and **mapping/cleaning** for scifi-ATAC FASTQ workflows with:
-
-- One CLI (```scifi-demux …```) and subcommands for **Step 1** (UMI → cutadapt → demux → merge) and **Step 2** (map → clean).
-- Optional **design file** to group wells into samples/pools; defaults to per-well outputs if omitted.
-- Resumable, **checkpointed** execution (local with GNU parallel; HPC with SLURM arrays).
-- Built-in **QC summaries** and a ready MultiQC config.
-
-![tests](https://github.com/gomezcan/scifi-demux/actions/workflows/tests.yml/badge.svg?branch=main)
+[![tests](https://github.com/gomezcan/scifi-demux/actions/workflows/tests.yml/badge.svg?branch=main)](https://github.com/gomezcan/scifi-demux/actions/workflows/tests.yml)
+[![codecov](https://codecov.io/gh/gomezcan/scifi-demux/branch/main/graph/badge.svg)](https://codecov.io/gh/gomezcan/scifi-demux)
 [![PyPI version](https://img.shields.io/pypi/v/scifi-demux.svg)](https://pypi.org/project/scifi-demux/)
 [![Python versions](https://img.shields.io/pypi/pyversions/scifi-demux.svg)](https://pypi.org/project/scifi-demux/)
+
+`scifi-demux` is a typed CLI toolkit to orchestrate **renaming**, **demultiplexing**, and **mapping/cleaning** of sci-fi ATAC-seq FASTQs.  
+It wraps existing bioinformatics tools in a reproducible, resumable, QC-aware framework.
+
+- One CLI (`scifi-demux …`) with subcommands for **Step 1** (UMI → cutadapt → demux → merge) and **Step 2** (map → clean).
+- Supports **local (GNU parallel)** and **HPC (SLURM array)** execution.
+- Uses optional **design files** for pooling/grouping, or defaults to per-well.
+- Generates built-in **QC summaries** and integrates with MultiQC.
+
 
 
 ## Installation
@@ -19,12 +22,6 @@ We recommend using conda/mamba so you get the bioinformatics tools (UMI-tools, c
 ```
 # HTTPS
 git clone https://github.com/gomezcan/scifi-demux
-cd scifi-demux
-```
-
-```
-# or SSH (recommended)
-git clone git@github.com:gomezcan/scifi-demux.git
 cd scifi-demux
 ```
 
@@ -74,7 +71,7 @@ conda config --add channels bioconda
 conda config --set channel_priority strict
 
 # install (from the repo you cloned)
-pip install -e /path/to/ambientmapper
+pip install -e /path/to/scifi-demux
 # or straight from GitHub
 pip install "git+https://github.com/gomezcan/scifi-demux.git"
 ```
@@ -98,44 +95,26 @@ multiqc --version
 >  - "**Step 2**: genome index resolve/build → mapping → 8 cleaning sub-steps → QC"
 
 
-## Step 1 — LOCAL mode end-to-en: plan (split library in chunks) + run demux (assigment pools based on degins ) + merge chunks
+## Step 1 LOCAL mode end-to-end: plan (split library in chunks) + run demux (assigment pools based on designs ) + merge chunks + QC
 Register a library and plan the run (dry-run shows what will execute):
 
-
-Dry run on an example step by step:
-
-Step 1A.
-```bash
-scifi-demux rename \
---fastq-dir /path/raw_fastq \
---plate-map example_configs/design.yaml \
---out /path/renamed --dry-run
+Step 1. End-to-end form, with design
 ```
-
-Step 1B option by_well: Demultiplex by wells across plates:
-
-```bash
-scifi-demux demux wells-by-plate \
---fastq-dir /path/renamed \
---plate-map example_configs/design.yaml \
---out /path/demux_wells \
+scifi-demux step1 run \
+--mode local \
+--library Sample1 \
+--raw-dir /path/raw/fastq.gz \  
+--design PlateDesign_SampleExample1.txt \
+--out /path/demux_samples   \
 --threads 8
 ```
 
-Step 1B option by_sample: Demultiplex by sample design (groups wells into samples):
-
-```bash
-scifi-demux demux sample-design \
---fastq-dir /path/renamed \
---design example_configs/design.yaml \
---out /path/demux_samples
+Step 1. End-to-end form, without design
 ```
-
-Alternatively, in a more combined end-to-end form:
-```
-scifi-demux step1 \
---fastq-dir /path/renamed \
---design example_configs/design.yaml \
+scifi-demux step1 run \
+--mode local \
+--library Sample1 \
+--raw-dir /path/raw/fastq.gz \  
 --out /path/demux_samples   \
 --threads 8
 ```
@@ -143,7 +122,7 @@ scifi-demux step1 \
 Step 1 will produce `{group}_R1.bc1.bc2.fastq.gz` / `{group}_R3.bc1.bc2.fastq.gz` per **group** = sample/pool from the design file, or per-well if no design is supplied.
 NOTE: In **local** mode, it creates one chunk per thread and launches the same number of threads as workers in parallel, with each thread processing its own chunk. This helps reduce memory usage and processing time.
 
-## Step 1A & 1A B — HPC mode end-to-en: plan (split library in chunks) +  run demux (assigment pools based on degins) 
+## Step 1. HPC mode end-to-en: plan (split library in chunks) +  run demux (assigment pools based on designs ) + merge chunks + QC
 
 ```
 #!/bin/bash
@@ -155,24 +134,21 @@ NOTE: In **local** mode, it creates one chunk per thread and launches the same n
 #SBATCH --mem=70G
 #SBATCH --job-name=Demux_step1
 #SBATCH --output=_logs/%x-%j.log
-#SBATCH --array=50%10 # 50 chunks process 10 at the time
+#SBATCH --array=1-50%10 # 50 chunks process 10 at the time
 
 conda activate scifi-demux
 
-if [[ -z "${SLURM_ARRAY_TASK_ID:-}" ]]; then
-  # 1 ) PLAN 
-  scifi-demux step1 run \
-    --library SampleExample1 \
+# 1 ) get workers plan
+scifi-demux step1 plan --library SampleExample1 \
     --raw-dir /path/raw \
-    --design PlateDesign_SampleExample1.txt \
-    --mode hpc \
     --chunks 50
-else
-  # 2 ) WORKER (array tasks)
-  scifi-demux step1 worker-chunk \
+  
+# 2 ) WORKER (array tasks)
+scifi-demux step1 worker-chunk \
     --plan SampleExample1_work/run_plan.step1.chunks.tsv \
     --mode hpc \
-    --design PlateDesign_SampleExample1.txt
+    --design PlateDesign_SampleExample1.txt \
+    --arra-id ${SLURM_ARRAY_TASK_ID}
 fi
 ```
 
