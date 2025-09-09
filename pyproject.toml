@@ -20,6 +20,8 @@ dependencies = [
 
 [project.scripts]
 scifi-demux = "scifi_demux.cli.main:app"
+scifi-demux = "scifi_demux.cli:app"
+scifi-demux-demux-core = "scifi_demux.demux_core_cli:main"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/scifi_demux"]
