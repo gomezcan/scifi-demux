@@ -1,13 +1,12 @@
 from __future__ import annotations
 import os
 from pathlib import Path
-from typing import Optional
+from typing import Optional, List
 import typer
 from rich.table import Table
 from rich.console import Console
 
 from scifi_demux.utils.logging import setup_logging
-from scifi_demux.steps.step1 import plan_chunks
 
 from scifi_demux.utils.state import (
     STATE_PATH_DEFAULT,
@@ -119,11 +118,11 @@ def step1_run(
         )
         console.print(f"[bold]Planned[/]: {plan_path}")
         console.print(
-            "Launch your array jobs separately. Each task runs:
-            "
+            "Launch your array jobs separately. Each task runs:\n  "
             f"scifi-demux step1 worker-chunk --plan {plan_path} --mode hpc"
             + (f" --design {design}" if design else "")
-        )
+)
+    
     else:
         raise typer.BadParameter("mode must be 'local' or 'hpc'")
 
@@ -135,18 +134,18 @@ def step1_run(
 def step1_worker_chunk(
     plan: Path = typer.Option(..., exists=True, help="run_plan.step1.chunks.tsv"),
     array_id: int = typer.Option(-1, help="1-based row index; if -1, read from env (SLURM/PBS/SGE/LSF)"),
-    layout: str = typer.Option("builtin"),
+    layout: Optional[str] = typer.Option(None, help="Path or 'builtin' (default)"),
     design: Optional[Path] = typer.Option(None),
     mode: str = typer.Option("local", help="local|hpc (affects threading policy)"),
 ):
     if array_id < 0:
         for var in ("SLURM_ARRAY_TASK_ID", "PBS_ARRAYID", "SGE_TASK_ID", "LSB_JOBINDEX", "ARRAY_ID"):
             if var in os.environ:
-                array_id = int(os.environ[var])
-                break
+                array_id = int(os.environ[var]); break
     if array_id < 1:
         raise typer.BadParameter("array_id not provided and no known ARRAY env var found")
     worker_chunk(plan=plan, idx=array_id, layout=layout, design=design, mode=mode)
+
 
 @step1_app.command("check")
 def step1_check(work_root: Path = typer.Option(..., help="<LIB>_work directory")):
@@ -156,6 +155,12 @@ def step1_check(work_root: Path = typer.Option(..., help="<LIB>_work directory")
         raise typer.Exit(1)
     console.print("[green]All chunk demux sentinels present. Safe to merge.")
 
+@step1_app.command("merge")
+def step1_merge(
+    library: str = typer.Option(..., help="Library / FASTQ prefix"),
+    work_root: Path = typer.Option(..., exists=True, help="<LIB>_work directory"),
+):
+    merge_library(library=library, work_root=work_root)
 
 @step1_app.command("missing-indices")
 def step1_missing_indices(work_root: Path = typer.Option(..., help="<LIB>_work directory")):
