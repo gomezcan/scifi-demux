@@ -7,8 +7,7 @@ Chunk-first **demultiplexing** and **mapping/cleaning** for scifi-ATAC FASTQ wor
 - Resumable, **checkpointed** execution (local with GNU parallel; HPC with SLURM arrays).
 - Built-in **QC summaries** and a ready MultiQC config.
 
-[![tests](https://github.com/gomezcan/scifi-demux/actions/workflows/tests.yml/badge.svg?branch=main)](https://github.com/gomezcan/scifi-demux/actions/workflows/tests.yml)
-
+![tests](https://github.com/gomezcan/scifi-demux/actions/workflows/tests.yml/badge.svg?branch=main)
 
 
 ## Installation
