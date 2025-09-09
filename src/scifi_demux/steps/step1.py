@@ -225,7 +225,11 @@ def wait_and_maybe_merge(library: str, work_root: Path, poll_interval: int = 60,
         if counts["total"] > 0 and counts["dem"] >= counts["total"]:
             _write_progress(work_root, library, poll_interval, max_wait_sec, "merging", "All chunks complete; merging", started)
             merge_library(library, work_root)
-            _write_progress(work_root, library, poll_interval, max_wait_sec, "complete", "Merge complete", started)
+            _write_progress(work_root, library, poll_interval, max_wait_sec, "qc", "Merge complete; running MultiQC", started)
+            # QC: use repo config if present; otherwise vanilla
+            cfg = Path("qc/multiqc_scifi.yaml")
+            run_multiqc(work_root, config=cfg if cfg.exists() else None)
+            _write_progress(work_root, library, poll_interval, max_wait_sec, "complete", "QC complete", started)
             return
         msg = f"{counts['dem']}/{counts['total']} chunks complete; missing={','.join(map(str, counts['missing']))}" if counts["total"] else "waiting for plan"
         _write_progress(work_root, library, poll_interval, max_wait_sec, "waiting", msg, started)
@@ -234,6 +238,26 @@ def wait_and_maybe_merge(library: str, work_root: Path, poll_interval: int = 60,
             raise TimeoutError("Reached max-wait while waiting for chunk completion")
         time.sleep(poll_interval)
 
+
+# --- QC hook (MultiQC) ---
+def run_multiqc(work_root: Path, *, config: Optional[Path] = None, out_subdir: str = "qc/report") -> None:
+    """
+    Run MultiQC over the library workspace. Non-fatal on absence/failure.
+    Looks in work_root and subdirs; writes report to work_root/<out_subdir>.
+    """
+    out_dir = work_root / out_subdir
+    out_dir.mkdir(parents=True, exist_ok=True)
+    cmd = ["multiqc", "--outdir", str(out_dir), str(work_root)]
+    if config:
+        cmd[1:1] = ["--config", str(config)]
+    try:
+        subprocess.run(cmd, check=True)
+        print(f"[multiqc] wrote report to {out_dir}")
+    except FileNotFoundError:
+        print("[multiqc] multiqc not found on PATH; skipping QC")
+    except subprocess.CalledProcessError as e:
+        print(f"[multiqc] multiqc failed with exit {e.returncode}; continuing")
+        
 # ---------- run_step1_hpc that supports follow ----------
 def run_step1_hpc(
     library: str,
@@ -252,3 +276,4 @@ def run_step1_hpc(
     if follow:
         wait_and_maybe_merge(library=library, work_root=work_root, poll_interval=poll_interval, max_wait=max_wait)
     return plan
+
