@@ -1,7 +1,6 @@
 from pathlib import Path
-from typing import Iterable
+from typing import Iterable, Optional, Union
 from importlib.resources import files
-from typing import Optional
 import shutil
 
 def data_path(name: str) -> Path:
@@ -37,3 +36,13 @@ def copy_or_link(src: Path, dst: Path, mode: str = "link") -> None:
     shutil.copy2(src, dst)
   else:
     atomic_symlink(src, dst)
+
+def resolve_layout_path(layout: Optional[Union[str, Path]]) -> Path:
+    """
+    Return a concrete path to the layout file.
+    - None or "builtin" -> packaged 96-well layout
+    - any other string/Path -> as-is (expanded to Path)
+    """
+    if layout is None or str(layout).lower() == "builtin":
+        return data_path("96well_Tn5_bc_layout.txt")
+    return Path(layout)
