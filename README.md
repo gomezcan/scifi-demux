@@ -62,18 +62,6 @@ conda activate scifi-demux
 pip install -e .
 ```
 
-#### Uninstall
-```bash
-pip uninstall scifi-demux
-```
-
-If you also created a dedicated conda/mamba environment
-
-```bash
-conda deactivate
-conda env remove -n scifi-demux
-```
-
 ### Option B — Install into an existing conda env
 ```
 conda activate <your-env>
@@ -99,6 +87,18 @@ parallel --version | head -1
 multiqc --version
 ```
 
+#### Uninstall
+
+```bash
+pip uninstall scifi-demux
+```
+
+If you also created a dedicated conda/mamba environment
+
+```bash
+conda deactivate
+conda env remove -n scifi-demux
+```
 
 ## Quick start
 
