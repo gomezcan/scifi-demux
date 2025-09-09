@@ -5,6 +5,8 @@ import os, subprocess, shutil  # add shutil
 from scifi_demux.utils.fs import ensure_dir, has_ok, write_ok, atomic_write_text
 from scifi_demux.io_utils import data_path
 from scifi_demux.io_utils import resolve_layout_path
+import time, json
+from datetime import datetime
 
 from scifi_demux.steps.primitives import (
     umi_extract_pair,              
@@ -46,7 +48,6 @@ def plan_chunks(raw_dir: Path, library: str, work_root: Path, chunks: int) -> Pa
 
 )
     return plan_path
-
 
 def worker_chunk(plan: Path, idx: int, layout: Optional[str], design: Optional[Path], mode: str = "local") -> None:
     # Read Nth (1-based) row
@@ -116,45 +117,6 @@ def run_step1_local(library: str, raw_dir: Path, design: Optional[Path], layout:
     merge_library(library=library, work_root=work_root)
 
 
-def run_step1_hpc(library: str, raw_dir: Path, design: Optional[Path], layout: str, chunks: int, threads_per_chunk: int, array_limit: int, submit: bool, partition: str, time: str, mem: str) -> None:
-    work_root = Path(f"{library}_work")
-    plan = plan_chunks(raw_dir=raw_dir, library=library, work_root=work_root, chunks=chunks)
-    # Render a simple sbatch that runs the worker for each chunk
-    array = f"1-{chunks}%{array_limit}" if array_limit else f"1-{chunks}"
-    sbatch = f"""#!/bin/bash
-#SBATCH --job-name=step1-{library}
-#SBATCH --partition={partition}
-#SBATCH --time={time}
-#SBATCH --mem={mem}
-#SBATCH --cpus-per-task={threads_per_chunk}
-#SBATCH --array={array}
-#SBATCH --output=_logs/step1-{library}-%A_%a.out
-set -euo pipefail
-scifi-demux step1 worker-chunk --plan {plan} --mode hpc --layout {layout} {'--design '+str(design) if design else ''}
-"""
-    sb_path = work_root / "step1_worker.sbatch"
-    atomic_write_text(sb_path, sbatch)
-    print(f"Wrote: {sb_path}")
-    # Merge script (dependent)
-    merge_sh = work_root / "step1_merge.sh"
-    atomic_write_text(merge_sh, f"#!/bin/bash
-set -euo pipefail
-scifi-demux step1 merge --library {library} --work-root {work_root}
-")
-    os.chmod(merge_sh, 0o755)
-    print(f"Wrote: {merge_sh}")
-    if submit:
-        # Submit array, then submit merge with dependency
-        out = subprocess.check_output(["sbatch", str(sb_path)])
-        job_id = out.decode().strip().split()[-1]
-        print(f"Submitted array job: {job_id}")
-        dep = f"afterok:{job_id}"
-        out2 = subprocess.check_output(["sbatch", "--dependency", dep, "--job-name", f"merge-{library}", "--output", f"_logs/merge-{library}-%j.out", str(merge_sh)])
-        print(out2.decode().strip())
-    else:
-        print(f"To run: sbatch {sb_path}")
-        print(f"Then, after it completes: {merge_sh}")
-
 def merge_library(library: str, work_root: Path) -> None:
     # Ensure all demux sentinels exist before merging
     plan = work_root / PLAN_NAME
@@ -172,3 +134,121 @@ def merge_library(library: str, work_root: Path) -> None:
     out_dir = work_root / "combined"
     summary = merge_demuxed_chunks(corr_dir=corr_dir, out_dir=out_dir, overwrite=True, keep_parts=False)
     print(f"[merge] wrote {len(summary)} samples to {out_dir}")
+
+# ---------- helpers for progress ----------
+def _expected_chunk_ids(work_root: Path) -> list[int]:
+    plan = work_root / PLAN_NAME
+    if not plan.exists():
+        return []
+    rows = [ln.strip() for ln in plan.read_text().splitlines() if ln.strip() and not ln.startswith("#")]
+    return [int(ln.split("\t", 1)[0]) for ln in rows]
+
+def report_missing_chunks(work_root: Path) -> list[int]:
+    expected = _expected_chunk_ids(work_root)
+    sent = work_root / "_sentinels"
+    missing: list[int] = []
+    for cid in expected:
+        if not (sent / f"chunk_{cid:03d}.demux.ok.json").exists():
+            missing.append(cid)
+    return missing
+
+def _parse_duration_to_sec(s: str | None) -> int | None:
+    if s in (None, "", "auto"): return None
+    s = s.strip().lower()
+    if s == "0": return 0
+    if s[-1] in "smhd":
+        mult = {'s':1,'m':60,'h':3600,'d':86400}[s[-1]]
+        return int(float(s[:-1]) * mult)
+    return int(float(s))
+
+def _detect_scheduler_timelimit_sec() -> int | None:
+    job_id = os.environ.get("SLURM_JOB_ID")
+    if not job_id:
+        return None
+    try:
+        out = subprocess.check_output(["scontrol","show","job",job_id], stderr=subprocess.DEVNULL).decode()
+        for tok in out.split():
+            if tok.startswith("TimeLimit="):
+                val = tok.split("=",1)[1]
+                if val == "UNLIMITED": return None
+                hh, mm, ss = map(int, val.split(":"))
+                return hh*3600 + mm*60 + ss
+    except Exception:
+        return None
+
+def _scan_counts(work_root: Path) -> dict:
+    total_ids = _expected_chunk_ids(work_root)
+    sent = work_root / "_sentinels"
+    umi = sum(1 for cid in total_ids if (sent / f"chunk_{cid:03d}.umi.ok.json").exists())
+    cut = sum(1 for cid in total_ids if (sent / f"chunk_{cid:03d}.cutadapt.ok.json").exists())
+    dem = sum(1 for cid in total_ids if (sent / f"chunk_{cid:03d}.demux.ok.json").exists())
+    missing = [cid for cid in total_ids if not (sent / f"chunk_{cid:03d}.demux.ok.json").exists()]
+    return {"total": len(total_ids), "umi": umi, "cut": cut, "dem": dem, "missing": missing}
+
+def _write_progress(work_root: Path, library: str, poll_interval: int, max_wait_sec: int | None, state: str, msg: str, started_ts: float) -> None:
+    ctrl = ensure_dir(work_root / "_control")
+    snap = ctrl / "progress.json"
+    nd = ctrl / "progress.ndjson"
+    counts = _scan_counts(work_root)
+    now = time.time()
+    obj = {
+        "stage": "step1",
+        "library": library,
+        "work_root": str(work_root),
+        "times": {
+            "started_at": datetime.utcfromtimestamp(started_ts).isoformat()+"Z",
+            "updated_at": datetime.utcfromtimestamp(now).isoformat()+"Z",
+            "elapsed_sec": int(now - started_ts),
+        },
+        "poll": {"interval_sec": poll_interval, "max_wait_sec": max_wait_sec},
+        "counts": {
+            "total": counts["total"], "umi": counts["umi"], "cut": counts["cut"], "dem": counts["dem"],
+            "missing": len(counts["missing"]), "missing_indices": counts["missing"],
+        },
+        "state": state,
+        "message": msg,
+    }
+    atomic_write_text(snap, json.dumps(obj, indent=2))
+    try:
+        with open(nd, "a") as fh:
+            fh.write(json.dumps(obj) + "\n")
+    except Exception:
+        pass
+
+def wait_and_maybe_merge(library: str, work_root: Path, poll_interval: int = 60, max_wait: str = "auto") -> None:
+    started = time.time()
+    max_wait_sec = _parse_duration_to_sec(max_wait)
+    if max_wait_sec is None:
+        max_wait_sec = _detect_scheduler_timelimit_sec()
+    while True:
+        counts = _scan_counts(work_root)
+        if counts["total"] > 0 and counts["dem"] >= counts["total"]:
+            _write_progress(work_root, library, poll_interval, max_wait_sec, "merging", "All chunks complete; merging", started)
+            merge_library(library, work_root)
+            _write_progress(work_root, library, poll_interval, max_wait_sec, "complete", "Merge complete", started)
+            return
+        msg = f"{counts['dem']}/{counts['total']} chunks complete; missing={','.join(map(str, counts['missing']))}" if counts["total"] else "waiting for plan"
+        _write_progress(work_root, library, poll_interval, max_wait_sec, "waiting", msg, started)
+        if max_wait_sec and (time.time() - started) >= max_wait_sec:
+            _write_progress(work_root, library, poll_interval, max_wait_sec, "timeout", "Timed out waiting for chunks", started)
+            raise TimeoutError("Reached max-wait while waiting for chunk completion")
+        time.sleep(poll_interval)
+
+# ---------- run_step1_hpc that supports follow ----------
+def run_step1_hpc(
+    library: str,
+    raw_dir: Path,
+    design: Optional[Path],
+    layout: str | None,
+    chunks: int,
+    *,
+    follow: bool,
+    poll_interval: int,
+    max_wait: str,
+) -> Path:
+    work_root = Path(f"{library}_work")
+    plan = plan_chunks(raw_dir=raw_dir, library=library, work_root=work_root, chunks=chunks)
+    # user submits the array externally; with --follow we poll and then merge
+    if follow:
+        wait_and_maybe_merge(library=library, work_root=work_root, poll_interval=poll_interval, max_wait=max_wait)
+    return plan
