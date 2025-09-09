@@ -1,4 +1,4 @@
-# scifi-demux: Renaming & Demultiplexing for sci-fi ATAC-seq
+# scifi-demux: Demultiplexing & Preprocessing for sci-fi ATAC-seq
 
 [![tests](https://github.com/gomezcan/scifi-demux/actions/workflows/tests.yml/badge.svg?branch=main)](https://github.com/gomezcan/scifi-demux/actions/workflows/tests.yml)
 [![codecov](https://codecov.io/gh/gomezcan/scifi-demux/branch/main/graph/badge.svg)](https://codecov.io/gh/gomezcan/scifi-demux)
