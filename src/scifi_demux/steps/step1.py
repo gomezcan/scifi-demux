@@ -17,6 +17,7 @@ from scifi_demux.steps.primitives import (
 
 PLAN_NAME = "run_plan.step1.chunks.tsv"
 
+
 def _raw_fastqs(raw_dir: Path, library: str) -> tuple[Path, Path]:
     r1 = raw_dir / f"{library}_R1.fastq.gz"
     r3 = raw_dir / f"{library}_R3.fastq.gz"
