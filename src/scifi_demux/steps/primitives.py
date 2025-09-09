@@ -3,6 +3,8 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Optional, List
 import shutil, subprocess, tempfile, os
+from scifi_demux.demux_core import demux_split_barcodes  # add
+
 
 def _which_or_raise(*bins: str):
     missing = [b for b in bins if shutil.which(b) is None]
@@ -93,14 +95,8 @@ def cutadapt_append_tn5_to_name(
         str(r1_in), str(r3_in),
     ])
 
-def demux_by_split_bc(
-    layout_file: Path,       # 96-well Tn5 layout
-    sample_well_map: Path,   # Pool→wells map
-    input_fastq_gz: Path,    # e.g., part_###_R1.bc1.bc2.fastq.gz OR ..._R3...
-    out_dir: Path,
-):
-    """Call your provided demux script (keeps its exact matching rules)."""
-    _which_or_raise("python")
-    out_dir.mkdir(parents=True, exist_ok=True)
-    script = Path(__file__).parent / "bin" / "2_1_1_fastq_sample_assign_and_fixTn5.ATAC.py"
-    _run(["python", str(script), str(layout_file), str(input_fastq_gz), str(sample_well_map), "--output", str(out_dir)])
+
+def demux_by_split_bc(layout_file: Path, sample_well_map: Path, input_fastq_gz: Path, out_dir: Path):
+    """Backwards-compatible shim that calls the in-package demux function."""
+    demux_split_barcodes(layout_file, input_fastq_gz, sample_well_map, output_dir=out_dir)
+
