@@ -4,9 +4,9 @@ from typing import Optional
 import os, subprocess
 from scifi_demux.utils.fs import ensure_dir, has_ok, write_ok, atomic_write_text
 from scifi_demux.io_utils import data_path
+from scifi_demux.steps.primitives import merge_demuxed_chunks
 
 PLAN_NAME = "run_plan.step1.chunks.tsv"
-
 
 def _raw_fastqs(raw_dir: Path, library: str) -> tuple[Path, Path]:
     r1 = raw_dir / f"{library}_R1.fastq.gz"
@@ -153,3 +153,21 @@ scifi-demux step1 merge --library {library} --work-root {work_root}
     else:
         print(f"To run: sbatch {sb_path}")
         print(f"Then, after it completes: {merge_sh}")
+
+def merge_library(library: str, work_root: Path) -> None:
+    # Ensure all demux sentinels exist before merging
+    plan = work_root / PLAN_NAME
+    rows = [ln for ln in plan.read_text().splitlines() if ln.strip() and not ln.startswith("#")]
+    sent_dir = work_root / "_sentinels"
+    missing = []
+    for ln in rows:
+        cid = int(ln.split("\t", 1)[0])
+        if not (sent_dir / f"chunk_{cid:03d}.demux.ok.json").exists():
+            missing.append(cid)
+    if missing:
+        raise RuntimeError(f"Cannot merge: missing demux sentinels for chunks: {missing}")
+
+    corr_dir = work_root / "Corrected"
+    out_dir = work_root / "combined"
+    summary = merge_demuxed_chunks(corr_dir=corr_dir, out_dir=out_dir, overwrite=True, keep_parts=False)
+    print(f"[merge] wrote {len(summary)} samples to {out_dir}")
