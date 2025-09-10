@@ -4,7 +4,10 @@ on:
   push:
     branches: [ main ]
   pull_request:
-    branches: [ main ]
+
+permissions:
+  contents: read
+  id-token: write   # <-- required for OIDC auth to Codecov
 
 jobs:
   test:
@@ -23,16 +26,22 @@ jobs:
           pip install -e .
           pip install pytest pytest-cov
 
-      - name: Run pytest with coverage
+      - name: Run tests with coverage
         run: |
-          pytest -q --cov=src/scifi_demux --cov-report=xml --cov-report=term
+          pytest -q --cov=scifi_demux --cov-report=xml
 
-      - name: Upload coverage to Codecov
+      # EITHER OIDC (recommended, no token)
+      - name: Upload coverage to Codecov (OIDC)
         uses: codecov/codecov-action@v4
         with:
-          files: ./coverage.xml
+          use_oidc: true
           fail_ci_if_error: true
           verbose: true
-        env:
-          # Public repo: token not required. For private repos, set CODECOV_TOKEN in repo Secrets.
-          CODECOV_TOKEN: ${{ secrets.CODECOV_TOKEN }}
+
+      # OR (comment OIDC step above and uncomment this block)
+      # - name: Upload coverage to Codecov (token)
+      #   uses: codecov/codecov-action@v4
+      #   with:
+      #     token: ${{ secrets.CODECOV_TOKEN }}
+      #     fail_ci_if_error: true
+      #     verbose: true
