@@ -1,3 +1,4 @@
+# .github/workflows/test.yml
 name: tests
 
 on:
@@ -7,41 +8,36 @@ on:
 
 permissions:
   contents: read
-  id-token: ecbe4eb5-2004-458b-bdd3-f4da554f5093   # <-- required for OIDC auth to Codecov
 
 jobs:
   test:
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+    # Test against a couple of common Pythons; adjust as you like
+    env:
+      PIP_DISABLE_PIP_VERSION_CHECK: "1"
     steps:
       - uses: actions/checkout@v4
 
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
-          python-version: "3.11"
+          python-version: '3.11'
+
+      - name: Cache pip
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/pip
+          key: ${{ runner.os }}-pip-${{ hashFiles('**/pyproject.toml') }}
+          restore-keys: |
+            ${{ runner.os }}-pip-
 
       - name: Install package + test deps
         run: |
           python -m pip install --upgrade pip
           pip install -e .
-          pip install pytest pytest-cov
+          pip install pytest
 
-      - name: Run tests with coverage
-        run: |
-          pytest -q --cov=scifi_demux --cov-report=xml
-
-      # EITHER OIDC (recommended, no token)
-      - name: Upload coverage to Codecov (OIDC)
-        uses: codecov/codecov-action@v4
-        with:
-          use_oidc: true
-          fail_ci_if_error: true
-          verbose: true
-
-      # OR (comment OIDC step above and uncomment this block)
-      # - name: Upload coverage to Codecov (token)
-      #   uses: codecov/codecov-action@v4
-      #   with:
-      #     token: ${{ secrets.CODECOV_TOKEN }}
-      #     fail_ci_if_error: true
-      #     verbose: true
+      - name: Run tests
+        run: pytest -q
