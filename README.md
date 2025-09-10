@@ -1,9 +1,9 @@
 # scifi-demux: Demultiplexing & Preprocessing for sci-fi ATAC-seq
 
-[![tests](https://github.com/gomezcan/scifi-demux/actions/workflows/tests.yml/badge.svg?branch=main)](https://github.com/gomezcan/scifi-demux/actions/workflows/tests.yml) 
-[![codecov](https://codecov.io/gh/gomezcan/scifi-demux/branch/main/graph/badge.svg)](https://codecov.io/gh/gomezcan/scifi-demux)
-[![PyPI version](https://img.shields.io/pypi/v/scifi-demux.svg)](https://pypi.org/project/scifi-demux/)
-[![Python versions](https://img.shields.io/pypi/pyversions/scifi-demux.svg)](https://pypi.org/project/scifi-demux/)
+![tests](https://github.com/gomezcan/scifi-demux/actions/workflows/tests.yml/badge.svg?branch=main)](https://github.com/gomezcan/scifi-demux/actions/workflows/tests.yml) 
+![codecov](https://codecov.io/gh/gomezcan/scifi-demux/branch/main/graph/badge.svg)](https://codecov.io/gh/gomezcan/scifi-demux)
+![PyPI version](https://img.shields.io/pypi/v/scifi-demux.svg)](https://pypi.org/project/scifi-demux/)
+![Python versions](https://img.shields.io/pypi/pyversions/scifi-demux.svg)](https://pypi.org/project/scifi-demux/)
 
 `scifi-demux` is a typed CLI toolkit to orchestrate **renaming**, **demultiplexing**, and **mapping/cleaning** of sci-fi ATAC-seq FASTQs.  
 It wraps existing bioinformatics tools in a reproducible, resumable, QC-aware framework.
