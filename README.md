@@ -1,6 +1,8 @@
 # scifi-demux: Demultiplexing & Preprocessing for sci-fi ATAC-seq
 
-[![tests](https://github.com/gomezcan/scifi-demux/actions/workflows/tests.yml/badge.svg)](https://github.com/gomezcan/scifi-demux/actions/workflows/tests.yml) 
+[![tests](https://github.com/gomezcan/scifi-demux/actions/workflows/tests.yml/badge.svg)](https://github.com/gomezcan/scifi-demux/actions/workflows/tests.yml)
+
+
 <p align="center">
   <img src="docs/Scifi_demux_1@350x.png" width="600">
 </p>
