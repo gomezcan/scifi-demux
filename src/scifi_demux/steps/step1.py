@@ -46,8 +46,6 @@ def plan_chunks(raw_dir: Path, library: str, work_root: Path, chunks: int) -> Pa
         lines.append(f"{i}	{library}	{r1p}	{r3p}	{work_root}")
     
     atomic_write_text(plan_path, "\n".join(lines) + "\n")
-
-)
     return plan_path
 
 def worker_chunk(plan: Path, idx: int, layout: Optional[str], design: Optional[Path], mode: str = "local") -> None:
