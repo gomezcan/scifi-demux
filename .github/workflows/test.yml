@@ -7,7 +7,7 @@ on:
 
 permissions:
   contents: read
-  id-token: write   # <-- required for OIDC auth to Codecov
+  id-token: ecbe4eb5-2004-458b-bdd3-f4da554f5093   # <-- required for OIDC auth to Codecov
 
 jobs:
   test:
