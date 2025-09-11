@@ -32,47 +32,61 @@ def _raw_fastqs(raw_dir: Path, library: str) -> tuple[Path, Path, Path]:
 
 def plan_chunks(raw_dir: Path, library: str, work_root: Path, chunks: int) -> Path:
     r1, r2, r3 = _raw_fastqs(raw_dir, library)
-    chunks_dir = ensure_dir(work_root / "chunks_raw")
+    work_root.mkdir(parents=True, exist_ok=True)
     plan_path = work_root / PLAN_NAME
 
-    # Split R1/R3 paired (keeps mates aligned)
-    if not any(chunks_dir.glob(f"{library}_R1.part_*.fastq.gz")):
+    # Output subdirs
+    r12_dir = ensure_dir(work_root / "chunks_r12")  # from split2(R1,R2)
+    r32_dir = ensure_dir(work_root / "chunks_r32")  # from split2(R3,R2)
+
+    # 1) split R1+R2 together
+    if not any(r12_dir.glob(f"{library}_R1.part_*.fastq.gz")):
         subprocess.run([
-            "seqkit", "split2", "--by-part", str(chunks),
-            "-1", str(r1), "-2", str(r3),
-            "-O", str(chunks_dir)
+            "seqkit","split2","--by-part",str(chunks),"-j","4",
+            "-1",str(r1),"-2",str(r2),
+            "-O",str(r12_dir)
         ], check=True)
 
-    # Split R2 alone into the same number of parts (counts are equal → boundaries align)
-    if not any(chunks_dir.glob(f"{library}_R2.part_*.fastq.gz")):
+    # 2) split R3+R2 together (to get an R2 series aligned to R3)
+    if not any(r32_dir.glob(f"{library}_R3.part_*.fastq.gz")):
         subprocess.run([
-            "seqkit", "split", "-p", str(chunks),
-            str(r2), "-O", str(chunks_dir)
+            "seqkit","split2","--by-part",str(chunks),"-j","4",
+            "-1",str(r3),"-2",str(r2),
+            "-O",str(r32_dir)
         ], check=True)
 
-    lines = ["#chunk_id\tlibrary\tr1_raw_chunk\tr2_raw_chunk\tr3_raw_chunk\tout_root"]
+    # Gather parts
+    r1_parts   = sorted(r12_dir.glob(f"{library}_R1.part_*.fastq.gz"))
+    r2r1_parts = sorted(r12_dir.glob(f"{library}_R2.part_*.fastq.gz"))  # R2 aligned to R1
+    r3_parts   = sorted(r32_dir.glob(f"{library}_R3.part_*.fastq.gz"))
+    r2r3_parts = sorted(r32_dir.glob(f"{library}_R2.part_*.fastq.gz"))  # R2 aligned to R3
 
-    r1_parts = sorted(chunks_dir.glob(f"{library}_R1.part_*.fastq.gz"))
-    r2_parts = sorted(chunks_dir.glob(f"{library}_R2.part_*.fastq.gz"))
-    r3_parts = sorted(chunks_dir.glob(f"{library}_R3.part_*.fastq.gz"))
+    if not (len(r1_parts)==len(r2r1_parts)==len(r3_parts)==len(r2r3_parts)==chunks):
+        raise RuntimeError(
+            f"Chunk count mismatch: R1={len(r1_parts)} R2(R1)={len(r2r1_parts)} "
+            f"R3={len(r3_parts)} R2(R3)={len(r2r3_parts)} expected={chunks}"
+        )
 
-    if not (len(r1_parts) == len(r2_parts) == len(r3_parts) == chunks):
-        raise RuntimeError(f"Chunk counts mismatch R1={len(r1_parts)} R2={len(r2_parts)} R3={len(r3_parts)} (expected {chunks})")
-
-    for i, (r1p, r2p, r3p) in enumerate(zip(r1_parts, r2_parts, r3_parts), start=1):
-        lines.append(f"{i}\t{library}\t{r1p}\t{r2p}\t{r3p}\t{work_root}")
+    # Write plan: both R2 series are included
+    lines = ["#chunk_id\tlibrary\tr1_raw_chunk\tr2_for_r1\tr3_raw_chunk\tr2_for_r3\tout_root"]
+    for i, (r1p, r2r1p, r3p, r2r3p) in enumerate(zip(r1_parts, r2r1_parts, r3_parts, r2r3_parts), start=1):
+        lines.append(f"{i}\t{library}\t{r1p}\t{r2r1p}\t{r3p}\t{r2r3p}\t{work_root}")
 
     atomic_write_text(plan_path, "\n".join(lines) + "\n")
     return plan_path
 
 def worker_chunk(plan: Path, idx: int, layout: Optional[str], design: Optional[Path], mode: str = "local") -> None:
-    rows = [ln.strip() for ln in plan.read_text().splitlines() if ln.strip() and not ln.startswith("#")]
+    rows = [ln.strip() for ln in plan.read_text().splitlines()
+        if ln.strip() and not ln.startswith("#")]
+
     if idx > len(rows):
         raise IndexError(f"array_id {idx} > plan rows {len(rows)}")
 
     # Now 6 cols: cid, lib, r1, r2, r3, work_root
-    chunk_id_s, library, r1_raw, r2_raw, r3_raw, work_root_s = rows[idx-1].split("\t")
-    chunk_id  = int(chunk_id_s); work_root = Path(work_root_s)
+    chunk_id_s, library, r1_raw, r2_for_r1, r3_raw, r2_for_r3, work_root_s = rows[idx-1].split("\t")
+    chunk_id  = int(chunk_id_s)
+    work_root = Path(work_root_s)
+    
     sent_dir  = ensure_dir(work_root / "_sentinels")
 
     bc1_dir    = ensure_dir(work_root / "bc1")
@@ -91,12 +105,12 @@ def worker_chunk(plan: Path, idx: int, layout: Optional[str], design: Optional[P
     cut_ok   = sent_dir / f"chunk_{chunk_id:03d}.cutadapt"
     demux_ok = sent_dir / f"chunk_{chunk_id:03d}.demux"
 
-    # 1) UMI: attach R2’s 10x BC/UMI to BOTH R1 and R3
+    # 1) UMI: attach R2→R1 and R2→R3 (two runs, each with its aligned R2)
     if not (sent_dir / (umi_ok.name + ".ok.json")).exists():
         # R1 <- (barcodes from) R2
-        umi_extract_pair(read_keep=Path(r1_raw), mate_in=Path(r2_raw), out_fastq_gz=r1_bc1, threads=threads)
+        umi_extract_pair(read_keep=Path(r1_raw), mate_in=Path(r2_for_r1), out_fastq_gz=r1_bc1, threads=threads)
         # R3 <- (barcodes from) R2
-        umi_extract_pair(read_keep=Path(r3_raw), mate_in=Path(r2_raw), out_fastq_gz=r3_bc1, threads=threads)
+        umi_extract_pair(read_keep=Path(r3_raw), mate_in=Path(r2_for_r3), out_fastq_gz=r3_bc1, threads=threads)
         write_ok(umi_ok, {"chunk": chunk_id, "step": "umi", "threads": threads})
 
     # 2) Cutadapt (safe defaults; do not discard)
