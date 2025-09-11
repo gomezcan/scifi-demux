@@ -30,23 +30,41 @@ def plan_chunks(raw_dir: Path, library: str, work_root: Path, chunks: int) -> Pa
     r1, r3 = _raw_fastqs(raw_dir, library)
     chunks_dir = ensure_dir(work_root / "chunks_raw")
     plan_path = work_root / PLAN_NAME
+
     # Split raw FASTQs into N parts using seqkit split2 (paired by part count)
-    # part names: part_001_R1.fq.gz and part_001_R3.fq.gz
-    if not any(chunks_dir.glob("part_*_R1.fastq.gz")):
+    if not any(chunks_dir.glob(f"{library}_R1.part_*.fastq.gz")) and \
+       not any(chunks_dir.glob("part_*_R1.fastq.gz")):
         subprocess.run([
-            "seqkit", "split2", "--by-part", str(chunks), "-1", str(r1), "-2", str(r3), "-O", str(chunks_dir)
+            "seqkit", "split2", "--by-part", str(chunks),
+            "-1", str(r1), "-2", str(r3),
+            "-O", str(chunks_dir)
         ], check=True)
-    
+
     # Create plan TSV
     lines = ["#chunk_id\tlibrary\tr1_raw_chunk\tr3_raw_chunk\tout_root"]
 
-    pairs = sorted(chunks_dir.glob("part_*_R1.fastq.gz"))
-    for i, r1p in enumerate(pairs, start=1):
-        r3p = chunks_dir / r1p.name.replace("_R1", "_R3")
-        lines.append(f"{i}	{library}	{r1p}	{r3p}	{work_root}")
-    
+    # Accept both naming styles:
+    r1_candidates = sorted(list(chunks_dir.glob(f"{library}_R1.part_*.fastq.gz")) +
+                           list(chunks_dir.glob("part_*_R1.fastq.gz")) +
+                           list(chunks_dir.glob(f"{library}_R1.part_*.fq.gz")) +
+                           list(chunks_dir.glob("part_*_R1.fq.gz")))
+
+    if not r1_candidates:
+        raise RuntimeError(
+            f"No R1 chunk files found in {chunks_dir}. "
+            "Expected patterns like '<LIB>_R1.part_001.fastq.gz' or 'part_001_R1.fastq.gz'."
+        )
+
+    for i, r1p in enumerate(sorted(r1_candidates), start=1):
+        # Robust mapping to R3: flip _R1 → _R3 in the stem
+        r3p = chunks_dir / r1p.name.replace("_R1.", "_R3.")
+        if not r3p.exists():
+            raise FileNotFoundError(f"Missing matching R3 for {r1p.name}: expected {r3p.name}")
+        lines.append(f"{i}\t{library}\t{r1p}\t{r3p}\t{work_root}")
+
     atomic_write_text(plan_path, "\n".join(lines) + "\n")
     return plan_path
+
 
 def worker_chunk(plan: Path, idx: int, layout: Optional[str], design: Optional[Path], mode: str = "local") -> None:
     # Read Nth (1-based) row
