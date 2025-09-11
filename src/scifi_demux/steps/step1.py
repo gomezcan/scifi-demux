@@ -17,104 +17,98 @@ from scifi_demux.steps.primitives import (
 
 PLAN_NAME = "run_plan.step1.chunks.tsv"
 
+# step1.py (key excerpts)
 
-def _raw_fastqs(raw_dir: Path, library: str) -> tuple[Path, Path]:
+PLAN_NAME = "run_plan.step1.chunks.tsv"
+
+def _raw_fastqs(raw_dir: Path, library: str) -> tuple[Path, Path, Path]:
     r1 = raw_dir / f"{library}_R1.fastq.gz"
+    r2 = raw_dir / f"{library}_R2.fastq.gz"
     r3 = raw_dir / f"{library}_R3.fastq.gz"
-    if not r1.exists() or not r3.exists():
-        raise FileNotFoundError(f"Missing raw FASTQs: {r1} {r3}")
-    return r1, r3
-
+    missing = [p for p in (r1,r2,r3) if not p.exists()]
+    if missing:
+        raise FileNotFoundError(f"Missing raw FASTQs: {' '.join(map(str, missing))}")
+    return r1, r2, r3
 
 def plan_chunks(raw_dir: Path, library: str, work_root: Path, chunks: int) -> Path:
-    r1, r3 = _raw_fastqs(raw_dir, library)
+    r1, r2, r3 = _raw_fastqs(raw_dir, library)
     chunks_dir = ensure_dir(work_root / "chunks_raw")
     plan_path = work_root / PLAN_NAME
 
-    # Split raw FASTQs into N parts using seqkit split2 (paired by part count)
-    if not any(chunks_dir.glob(f"{library}_R1.part_*.fastq.gz")) and \
-       not any(chunks_dir.glob("part_*_R1.fastq.gz")):
+    # Split R1/R3 paired (keeps mates aligned)
+    if not any(chunks_dir.glob(f"{library}_R1.part_*.fastq.gz")):
         subprocess.run([
             "seqkit", "split2", "--by-part", str(chunks),
             "-1", str(r1), "-2", str(r3),
             "-O", str(chunks_dir)
         ], check=True)
 
-    # Create plan TSV
-    lines = ["#chunk_id\tlibrary\tr1_raw_chunk\tr3_raw_chunk\tout_root"]
+    # Split R2 alone into the same number of parts (counts are equal → boundaries align)
+    if not any(chunks_dir.glob(f"{library}_R2.part_*.fastq.gz")):
+        subprocess.run([
+            "seqkit", "split", "-p", str(chunks),
+            str(r2), "-O", str(chunks_dir)
+        ], check=True)
 
-    # Accept both naming styles:
-    r1_candidates = sorted(list(chunks_dir.glob(f"{library}_R1.part_*.fastq.gz")) +
-                           list(chunks_dir.glob("part_*_R1.fastq.gz")) +
-                           list(chunks_dir.glob(f"{library}_R1.part_*.fq.gz")) +
-                           list(chunks_dir.glob("part_*_R1.fq.gz")))
+    lines = ["#chunk_id\tlibrary\tr1_raw_chunk\tr2_raw_chunk\tr3_raw_chunk\tout_root"]
 
-    if not r1_candidates:
-        raise RuntimeError(
-            f"No R1 chunk files found in {chunks_dir}. "
-            "Expected patterns like '<LIB>_R1.part_001.fastq.gz' or 'part_001_R1.fastq.gz'."
-        )
+    r1_parts = sorted(chunks_dir.glob(f"{library}_R1.part_*.fastq.gz"))
+    r2_parts = sorted(chunks_dir.glob(f"{library}_R2.part_*.fastq.gz"))
+    r3_parts = sorted(chunks_dir.glob(f"{library}_R3.part_*.fastq.gz"))
 
-    for i, r1p in enumerate(sorted(r1_candidates), start=1):
-        # Robust mapping to R3: flip _R1 → _R3 in the stem
-        r3p = chunks_dir / r1p.name.replace("_R1.", "_R3.")
-        if not r3p.exists():
-            raise FileNotFoundError(f"Missing matching R3 for {r1p.name}: expected {r3p.name}")
-        lines.append(f"{i}\t{library}\t{r1p}\t{r3p}\t{work_root}")
+    if not (len(r1_parts) == len(r2_parts) == len(r3_parts) == chunks):
+        raise RuntimeError(f"Chunk counts mismatch R1={len(r1_parts)} R2={len(r2_parts)} R3={len(r3_parts)} (expected {chunks})")
+
+    for i, (r1p, r2p, r3p) in enumerate(zip(r1_parts, r2_parts, r3_parts), start=1):
+        lines.append(f"{i}\t{library}\t{r1p}\t{r2p}\t{r3p}\t{work_root}")
 
     atomic_write_text(plan_path, "\n".join(lines) + "\n")
     return plan_path
 
-
 def worker_chunk(plan: Path, idx: int, layout: Optional[str], design: Optional[Path], mode: str = "local") -> None:
-    # Read Nth (1-based) row
     rows = [ln.strip() for ln in plan.read_text().splitlines() if ln.strip() and not ln.startswith("#")]
     if idx > len(rows):
         raise IndexError(f"array_id {idx} > plan rows {len(rows)}")
-    
-    chunk_id, library, r1_raw, r3_raw, work_root = rows[idx-1].split("\t")
-    chunk_id = int(chunk_id)
-    work_root = Path(work_root)
-    sent_dir = ensure_dir(work_root / "_sentinels")
 
-    # Paths for intermediates
-    bc1_dir     = ensure_dir(work_root / "bc1")
-    bc1bc2_dir  = ensure_dir(work_root / "bc1bc2")
-    corr_dir    = ensure_dir(work_root / "Corrected")
+    # Now 6 cols: cid, lib, r1, r2, r3, work_root
+    chunk_id_s, library, r1_raw, r2_raw, r3_raw, work_root_s = rows[idx-1].split("\t")
+    chunk_id  = int(chunk_id_s); work_root = Path(work_root_s)
+    sent_dir  = ensure_dir(work_root / "_sentinels")
 
-    r1_bc1 = bc1_dir / f"part_{chunk_id:03d}_R1.bc1.fastq.gz"
-    r3_bc1 = bc1_dir / f"part_{chunk_id:03d}_R3.bc1.fastq.gz"
+    bc1_dir    = ensure_dir(work_root / "bc1")
+    bc1bc2_dir = ensure_dir(work_root / "bc1bc2")
+    corr_dir   = ensure_dir(work_root / "Corrected")
+
+    r1_bc1 = bc1_dir    / f"part_{chunk_id:03d}_R1.bc1.fastq.gz"
+    r3_bc1 = bc1_dir    / f"part_{chunk_id:03d}_R3.bc1.fastq.gz"
     r1_bc2 = bc1bc2_dir / f"part_{chunk_id:03d}_R1.bc1.bc2.fastq.gz"
     r3_bc2 = bc1bc2_dir / f"part_{chunk_id:03d}_R3.bc1.bc2.fastq.gz"
 
     threads = int(os.environ.get("SLURM_CPUS_PER_TASK") or os.environ.get("NSLOTS") or 1) if mode == "hpc" else 1
-    # 1) UMI
-    umi_ok = sent_dir / f"chunk_{chunk_id:03d}.umi.ok.json"
-    if not umi_ok.exists():
-        # R1 keep, mate=R3
-        umi_extract_pair(read_keep=Path(r1_raw), mate_in=Path(r3_raw), out_fastq_gz=r1_bc1, threads=threads)
-        # R3 keep, mate=R2 if available (your R3 SLURM did this)
-        r2_raw = Path(str(r3_raw).replace("_R3.", "_R2."))
-        if r2_raw.exists():
-            umi_extract_pair(read_keep=Path(r3_raw), mate_in=r2_raw, out_fastq_gz=r3_bc1, threads=threads)
-        else:
-            if not r3_bc1.exists():
-                shutil.copyfile(r3_raw, r3_bc1)
+
+    # --- Sentinels: pass *stem* to write_ok (it adds .ok.json)
+    umi_ok   = sent_dir / f"chunk_{chunk_id:03d}.umi"
+    cut_ok   = sent_dir / f"chunk_{chunk_id:03d}.cutadapt"
+    demux_ok = sent_dir / f"chunk_{chunk_id:03d}.demux"
+
+    # 1) UMI: attach R2’s 10x BC/UMI to BOTH R1 and R3
+    if not (sent_dir / (umi_ok.name + ".ok.json")).exists():
+        # R1 <- (barcodes from) R2
+        umi_extract_pair(read_keep=Path(r1_raw), mate_in=Path(r2_raw), out_fastq_gz=r1_bc1, threads=threads)
+        # R3 <- (barcodes from) R2
+        umi_extract_pair(read_keep=Path(r3_raw), mate_in=Path(r2_raw), out_fastq_gz=r3_bc1, threads=threads)
         write_ok(umi_ok, {"chunk": chunk_id, "step": "umi", "threads": threads})
 
-    # 2) Cutadapt
-    cut_ok = sent_dir / f"chunk_{chunk_id:03d}.cutadapt.ok.json"
-    if not cut_ok.exists():
+    # 2) Cutadapt (safe defaults; do not discard)
+    if not (sent_dir / (cut_ok.name + ".ok.json")).exists():
         cutadapt_append_tn5_to_name(r1_in=r1_bc1, r3_in=r3_bc1, r1_out=r1_bc2, r3_out=r3_bc2, threads=min(threads, 8))
         write_ok(cut_ok, {"chunk": chunk_id, "step": "cutadapt", "threads": threads})
 
-    # 3) Demux for R1 and R3 (paired outputs)
-    demux_ok = sent_dir / f"chunk_{chunk_id:03d}.demux.ok.json"
-    if not demux_ok.exists():
-        layout_path = resolve_layout_path(layout)  # None/"builtin" -> packaged 96-well layout
+    # 3) Demux (requires design + layout)
+    if not (sent_dir / (demux_ok.name + ".ok.json")).exists():
+        layout_path = resolve_layout_path(layout)
         if not design:
-            raise ValueError("demux requires --design (sample→wells mapping)")
-        # run for R1 and R3 so merge can write paired per-sample fastqs
+            raise ValueError("demux requires --design")
         demux_by_split_bc(layout_file=layout_path, sample_well_map=design, input_fastq_gz=r1_bc2, out_dir=corr_dir)
         demux_by_split_bc(layout_file=layout_path, sample_well_map=design, input_fastq_gz=r3_bc2, out_dir=corr_dir)
         write_ok(demux_ok, {"chunk": chunk_id, "step": "demux", "threads": threads})
