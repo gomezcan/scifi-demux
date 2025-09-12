@@ -39,3 +39,20 @@ def resolve_layout_path(layout: Optional[Union[str, Path]]) -> Path:
     if layout is None or str(layout).lower() == "builtin":
         return data_path("96well_Tn5_bc_layout.txt")
     return Path(layout)
+
+def ensure_dir(d: Path) -> Path:
+    d.mkdir(parents=True, exist_ok=True)
+    return d
+
+def find_fastqs(root: Path) -> List[Path]:
+    """
+    Recursively find FASTQs under `root`. Handles .fastq, .fq, and .gz variants.
+    Returns sorted Paths.
+    """
+    exts = (".fastq", ".fq", ".fastq.gz", ".fq.gz")
+    out: List[Path] = []
+    for p in root.rglob("*"):
+        name = p.name.lower()
+        if name.endswith(exts):
+            out.append(p)
+    return sorted(out)
