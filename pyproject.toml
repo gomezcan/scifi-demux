@@ -28,5 +28,7 @@ packages = ["src/scifi_demux"]
 [tool.hatch.build]
 include = [
   "src/scifi_demux/__data__/96well_Tn5_bc_layout.txt",
+  "src/scifi_demux/__data__/737K-cratac-v1.txt",
+  "src/scifi_demux/__data__/tn5_bcs.txt",
   "src/scifi_demux/__data__/__init__.py",
 ]
