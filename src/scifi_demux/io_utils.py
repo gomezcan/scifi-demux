@@ -1,26 +1,28 @@
-# io_utils.py
+# src/scifi_demux/io_utils.py
+from __future__ import annotations
+
 from pathlib import Path
 from typing import Optional, Union, List
+import shutil
 
+# --- packaged data resolution ---
 def data_path(name: str) -> Path:
     """
     Locate packaged data robustly:
       1) Prefer filesystem path relative to this module (works in editable + wheel installs).
-      2) Fall back to importlib.resources using the *parent* package (avoids importing __data__).
+      2) Fall back to importlib.resources using the parent package.
     """
-    # 1) direct filesystem path
     pkg_root = Path(__file__).resolve().parent  # .../scifi_demux
     fs = pkg_root / "__data__" / name
     if fs.exists():
         return fs
-
-    # 2) resource fallback (Python 3.9+)
     try:
         from importlib.resources import files as _files
         return Path(_files("scifi_demux") / "__data__" / name)
     except Exception as e:
-        raise FileNotFoundError(f"Could not locate data file '{name}' "
-                                f"(looked at {fs}) and resource fallback failed: {e}")
+        raise FileNotFoundError(
+            f"Could not locate data file '{name}' (looked at {fs}); fallback failed: {e}"
+        )
 
 def resolve_tn5_bcs(user_path: Optional[str]) -> Path:
     if user_path and user_path.lower() != "builtin":
@@ -40,14 +42,14 @@ def resolve_layout_path(layout: Optional[Union[str, Path]]) -> Path:
         return data_path("96well_Tn5_bc_layout.txt")
     return Path(layout)
 
+# --- filesystem helpers used by CLI / renaming ---
 def ensure_dir(d: Path) -> Path:
     d.mkdir(parents=True, exist_ok=True)
     return d
 
 def find_fastqs(root: Path) -> List[Path]:
     """
-    Recursively find FASTQs under `root`. Handles .fastq, .fq, and .gz variants.
-    Returns sorted Paths.
+    Recursively find FASTQ files under `root`.
     """
     exts = (".fastq", ".fq", ".fastq.gz", ".fq.gz")
     out: List[Path] = []
@@ -56,3 +58,28 @@ def find_fastqs(root: Path) -> List[Path]:
         if name.endswith(exts):
             out.append(p)
     return sorted(out)
+
+def atomic_symlink(src: Path, dst: Path) -> None:
+    """
+    Create/replace a symlink at `dst` pointing to `src` atomically-ish.
+    If `dst` exists (file/link), it is removed first.
+    """
+    dst = Path(dst)
+    dst.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        if dst.exists() or dst.is_symlink():
+            dst.unlink()
+    except FileNotFoundError:
+        pass
+    dst.symlink_to(src)
+
+def copy_or_link(src: Path, dst: Path, mode: str = "link") -> None:
+    """
+    Copy or symlink `src` -> `dst`. `mode`: 'link' (default) or 'copy'.
+    """
+    src = Path(src); dst = Path(dst)
+    if mode == "copy":
+        dst.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(src, dst)
+    else:
+        atomic_symlink(src, dst)
