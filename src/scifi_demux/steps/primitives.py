@@ -34,21 +34,23 @@ def umi_extract_pair(
     out_fastq_gz.parent.mkdir(parents=True, exist_ok=True)
 
     if not do_chunking:
-        # Single run: let umi_tools write modified read2 to stdout, pipe to pigz
-        p1 = subprocess.Popen([
+        # ---- simple path: write read2 to a temp plain FASTQ, then compress ----
+        tmp_out = out_fastq_gz.with_suffix("")  # e.g. .../part_002_R1.bc1.fastq
+        _run([
             "umi_tools", "extract",
             f"--bc-pattern={umi_pattern}",
-            f"--stdin={str(mate_in)}",      # barcodes from R2
-            f"--read2-in={str(read_keep)}", # keep R1 or R3
-            "--read2-out=-",                # FASTQ to stdout
+            f"--stdin={str(mate_in)}",      # R2 (UMI source)
+            f"--read2-in={str(read_keep)}", # keep (R1 or R3)
+            f"--read2-out={str(tmp_out)}",  # write KEEP here (plain FASTQ)
             "--log2stderr",
-        ], stdout=subprocess.PIPE)
+        ])
         with open(out_fastq_gz, "wb") as fout:
-            p2 = subprocess.Popen(["pigz", "-p", str(threads), "-c"], stdin=p1.stdout, stdout=fout)
-            p1.stdout.close()
-            rc2 = p2.wait(); rc1 = p1.wait()
-        if rc1 != 0 or rc2 != 0:
-            raise RuntimeError(f"umi_tools/pigz failed (umi_tools={rc1}, pigz={rc2})")
+            subprocess.run(["pigz", "-p", str(threads), "-c", str(tmp_out)],
+                           check=True, stdout=fout)
+        try:
+            tmp_out.unlink()
+        except FileNotFoundError:
+            pass
         return
 
     # Large-file path: chunk read_keep and mate_in together → per-chunk extract → concat → gzip
