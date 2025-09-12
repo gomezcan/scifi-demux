@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "scifi-demux"
-version = "0.1.0"
+version = "0.1.1"  # <-- bump so pip doesn't reuse a cached wheel
 description = "Wraps renaming and demultiplexing scripts for scifi-ATAC FASTQ workflows"
 readme = "README.md"
 authors = [{ name = "Fabio Gomez", email = "gomezcan@umich.edu" }]
@@ -21,14 +21,17 @@ dependencies = [
 [project.scripts]
 scifi-demux = "scifi_demux.cli:app"
 
-
+# wheel target (src layout)
 [tool.hatch.build.targets.wheel]
 packages = ["src/scifi_demux"]
-
-[tool.hatch.build]
 include = [
-  "src/scifi_demux/__data__/96well_Tn5_bc_layout.txt",
-  "src/scifi_demux/__data__/737K-cratac-v1.txt",
-  "src/scifi_demux/__data__/tn5_bcs.txt",
-  "src/scifi_demux/__data__/__init__.py",
+  "src/scifi_demux/__data__/**",  # ship all data files in the wheel
+]
+
+# sdist target (source distribution)
+[tool.hatch.build.targets.sdist]
+include = [
+  "src/scifi_demux/**",
+  "README.md",
+  "LICENSE",
 ]
