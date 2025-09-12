@@ -1,6 +1,6 @@
 # io_utils.py
 from pathlib import Path
-from typing import Optional, Union
+from typing import Optional, Union, List
 
 def data_path(name: str) -> Path:
     """
