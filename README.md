@@ -10,13 +10,15 @@
 
 
 
-`scifi-demux` is a typed CLI toolkit to orchestrate **renaming**, **demultiplexing**, and **mapping/cleaning** of sci-fi ATAC-seq FASTQs.  
+`scifi-demux` is a typed CLI toolkit for **renaming**, **demultiplexing**, and **mapping/cleaning** sci-fi ATAC-seq FASTQs.  
 It wraps existing bioinformatics tools in a reproducible, resumable, QC-aware framework.
 
-- One CLI (`scifi-demux …`) with subcommands for **Step 1** (UMI → cutadapt → demux → merge) and **Step 2** (map → clean).
-- Supports **local (GNU parallel)** and **HPC (SLURM array)** execution.
-- Uses optional **design files** for pooling/grouping, or defaults to per-well.
-- Generates built-in **QC summaries** and integrates with MultiQC.
+- Single CLI (`scifi-demux …`) with subcommands:
+  - **Step 1**: UMI → cutadapt → demux → merge
+  - **Step 2**: map → clean
+- Runs in both **local (GNU parallel)** and **HPC (SLURM array)** modes
+- Supports **design files** (for pooling/grouping) or defaults to per-well demux
+- Generates built-in **QC summaries** and integrates with **MultiQC**
 
 
 
@@ -25,7 +27,7 @@ It wraps existing bioinformatics tools in a reproducible, resumable, QC-aware fr
 We recommend using conda/mamba so you get the bioinformatics tools (UMI-tools, cutadapt, bwa, samtools, picard, seqkit, GNU parallel, MultiQC) alongside the Python CLI.
 
 ```
-# HTTPS
+# Clone the rep
 git clone https://github.com/gomezcan/scifi-demux
 cd scifi-demux
 ```
@@ -109,10 +111,10 @@ conda env remove -n scifi-demux
 
 > The CLI is being built in two stages:
 >  - "**Step 1**: UMI → cutadapt → (chunk) demux → merge → QC"
->  - "**Step 2**: genome index resolve/build → mapping → 8 cleaning sub-steps → QC"
+>  - "**Step 2**: genome index resolve/build → mapping → cleaning sub-steps → QC"
 
 
-## Step 1 LOCAL mode end-to-end: plan (split library in chunks) + run demux (assigment pools based on designs ) + merge chunks + QC
+## Step 1 LOCAL mode end-to-end: plan (split library in chunks) + run demux (assignment pools based on designs ) + merge chunks + QC
 Register a library and plan the run (dry-run shows what will execute):
 
 Step 1. End-to-end form, with design
@@ -137,9 +139,18 @@ scifi-demux step1 run \
 ```
 
 Step 1 will produce `{group}_R1.bc1.bc2.fastq.gz` / `{group}_R3.bc1.bc2.fastq.gz` per **group** = sample/pool from the design file, or per-well if no design is supplied.
-NOTE: In **local** mode, it creates one chunk per thread and launches the same number of threads as workers in parallel, with each thread processing its own chunk. This helps reduce memory usage and processing time.
 
-## Step 1. HPC mode end-to-en: plan (split library in chunks) +  run demux (assigment pools based on designs ) + merge chunks + QC
+Note: In **local** mode, the number of chunks equals the number of threads. Each thread processes one chunk in parallel, which balances memory and runtime.
+
+
+## Step 1. HPC mode end-to-end: plan (split library in chunks) +  run demux (assignment pools based on designs ) + merge chunks + QC
+
+```bash
+# 1 ) get workers plan
+scifi-demux step1 plan --library SampleExample1 \
+    --raw-dir /path/to/raw_fastqs \
+    --chunks 5
+```    
 
 ```
 #!/bin/bash
@@ -147,40 +158,29 @@ NOTE: In **local** mode, it creates one chunk per thread and launches the same n
 #SBATCH --time=8:00:00
 #SBATCH --nodes=1
 #SBATCH --ntasks-per-node=1
-#SBATCH --cpus-per-task=16
+#SBATCH --cpus-per-task=10
 #SBATCH --mem=70G
 #SBATCH --job-name=Demux_step1
 #SBATCH --output=_logs/%x-%j.log
-#SBATCH --array=1-50%10 # 50 chunks process 10 at the time
+#SBATCH --array=1-6 # 1–5: chunks, 6: follow+merge+QC
 
 conda activate scifi-demux
-
-# 1 ) get workers plan
-scifi-demux step1 plan --library SampleExample1 \
-    --raw-dir /path/raw \
-    --chunks 50
   
 # 2 ) WORKER (array tasks)
-scifi-demux step1 worker-chunk \
-    --plan SampleExample1_work/run_plan.step1.chunks.tsv \
-    --mode hpc \
-    --design PlateDesign_SampleExample1.txt \
-    --arra-id ${SLURM_ARRAY_TASK_ID}
-fi
+scifi-demux step1 run \
+  --mode hpc \
+  --library SampleExample1 \
+  --raw-dir SampleExample1_work \ # dir output of "scifi-demux step1 plan"
+  --layout builtin \
+  --design PlateDesign_SampleExample1.txt \
+  --threads 20 \
+  --chunks 5
 ```
+Note: In this example, we have 5 chunks, each processed by a separate job in the array. An additional job will merge the results from the chunks and QC summary.
 
-After the array finishes, run the merge/check commands once.
-
-```
-# 3) After all array tasks finish, merge (barriered)
-scifi-demux step1 merge --library SampleExample1 --work-root SampleExample1_work
-
-# 4) Check completeness before merging
-scifi-demux step1 check --library SampleExample1 --work-root SampleExample1_work
-```
 
 ## Step 2 — plan & run mapping/cleaning
-Create a simple TSV describing mapping tasks:
+Requires TSV describing mapping plan:
 ```swift
 # sample_base<TAB>target_genome<TAB>ref_path
 Pool1	B73	/path/to/indexes/Index_B73_bwa
