@@ -34,6 +34,7 @@ from .steps.step1 import (
     worker_chunk,
     report_missing_chunks,
     merge_library,
+    wait_and_maybe_merge
 )
 
 app = typer.Typer(add_completion=False, help="scifi-ATAC FASTQ renaming & demultiplexing wrapper")
