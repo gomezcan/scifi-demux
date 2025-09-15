@@ -49,8 +49,7 @@ def umi_extract_pair(
             f"--bc-pattern={umi_pattern}",
             f"--stdin={str(mate_in)}",      # R2 (UMI source)
             f"--read2-in={str(read_keep)}", # keep (R1 or R3)
-            f"--read2-out={str(tmp_out)}",  # write KEEP here (plain FASTQ)
-            f"--log={str(log_path)}"            
+            f"--read2-out={str(tmp_out)}",  # write KEEP here (plain FASTQ)            
         ])
         with open(out_fastq_gz, "wb") as fout:
             subprocess.run(["pigz", "-p", str(threads), "-c", str(tmp_out)],
