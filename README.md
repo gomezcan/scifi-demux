@@ -181,10 +181,11 @@ Note: In this example, we have 5 chunks, each processed by a separate job in the
 
 ## Step 2 — plan & run mapping/cleaning
 Requires TSV describing mapping plan:
-```swift
-# sample_base<TAB>target_genome<TAB>ref_path
-Pool1	B73	/path/to/indexes/Index_B73_bwa
-Pool1	Mo17	/path/to/genomes/Mo17.fa
+```md
+# sample_base    target_genome    ref_path
+Pool1    B73    /path/to/indexes/Index_B73_bwa
+Pool1    Mo17   /path/to/genomes/Mo17.fa
+
 ```
 
 Plan, then (initially) dry-run:
