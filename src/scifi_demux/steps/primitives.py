@@ -33,6 +33,14 @@ def umi_extract_pair(
     _which_or_raise("umi_tools", "pigz")
     out_fastq_gz.parent.mkdir(parents=True, exist_ok=True)
 
+    # temp plain-FASTQ (umi_tools can't write gz directly); compress after
+    tmp_out = out_fastq_gz.with_suffix("")  # strip .gz → *.fastq
+    if tmp_out.suffix != ".fastq":
+        tmp_out = tmp_out.with_suffix(".fastq")
+        
+    # per-chunk umi log file lives alongside output
+    log_path = out_fastq_gz.with_name(out_fastq_gz.name + ".umi.log")
+
     if not do_chunking:
         # ---- simple path: write read2 to a temp plain FASTQ, then compress ----
         tmp_out = out_fastq_gz.with_suffix("")  # e.g. .../part_002_R1.bc1.fastq
