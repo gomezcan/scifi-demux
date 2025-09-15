@@ -42,7 +42,8 @@ def umi_extract_pair(
             f"--stdin={str(mate_in)}",      # R2 (UMI source)
             f"--read2-in={str(read_keep)}", # keep (R1 or R3)
             f"--read2-out={str(tmp_out)}",  # write KEEP here (plain FASTQ)
-            "--log2stderr",
+            f"--log={str(log_path)}",
+            "--log2stderr=False",
         ])
         with open(out_fastq_gz, "wb") as fout:
             subprocess.run(["pigz", "-p", str(threads), "-c", str(tmp_out)],
