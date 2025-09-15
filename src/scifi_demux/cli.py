@@ -92,6 +92,20 @@ def demux_sample_design(
 
 
 # ------------------------------------------------------------------------------------
+# helper
+# ------------------------------------------------------------------------------------
+
+def _read_array_id_from_env() -> int | None:
+    for var in ("SLURM_ARRAY_TASK_ID", "PBS_ARRAYID", "SGE_TASK_ID", "LSB_JOBINDEX", "ARRAY_ID"):
+        v = os.environ.get(var)
+        if v:
+            try:
+                return int(v)
+            except ValueError:
+                pass
+    return None
+
+# ------------------------------------------------------------------------------------
 # Status
 # ------------------------------------------------------------------------------------
 @app.command()
@@ -137,20 +151,24 @@ def step1_plan(
 @step1_app.command("run")
 def step1_run(
     library: str = typer.Option(..., help="Library / FASTQ prefix"),
-    raw_dir: Path = typer.Option(Path("."), help="Dir with {lib}_R1.fastq.gz & {lib}_R3.fastq.gz"),
+    raw_dir: Path = typer.Option(Path("."), help="Dir with {lib}_R[1,2,3].fastq.gz"),
     design: Optional[Path] = typer.Option(None, help="PlateDesign_*.txt; omit for per-well outputs"),
     layout: str = typer.Option("builtin", help="Tn5 layout file or 'builtin'"),
     mode: str = typer.Option("local", help="local|hpc"),
-    # local fan-out
-    threads: int = typer.Option(8, help="LOCAL: number of chunks & parallel workers"),
-    # hpc planning/following
+    # local fan-out (and default for HPC if --chunks omitted)
+    threads: int = typer.Option(8, help="LOCAL: number of chunks & parallel workers; HPC default when --chunks omitted"),
+    # explicit chunk count for HPC if you want different from --threads
     chunks: Optional[int] = typer.Option(None, help="HPC: total chunks (defaults to --threads if omitted)"),
-    follow: bool = typer.Option(False, help="HPC: poll for completion and auto-merge when done (no job submission)"),
-    poll_interval: int = typer.Option(60, help="HPC: seconds between progress checks (default: 60)"),
-    max_wait: str = typer.Option("auto", help="HPC: maximum wait time (e.g., 12h, 3600s). 'auto' = use scheduler job time if detectable; 0 = unlimited"),
+    # follow/QC knobs (used by the 'follow' task in HPC or after local run)
+    follow: bool = typer.Option(False, help="LOCAL: merge/QC after fan-out; HPC: ignored for array roles (auto)"),
+    poll_interval: int = typer.Option(60, help="Seconds between progress checks"),
+    max_wait: str = typer.Option("auto", help="Max wait (e.g., 12h, 3600s). 'auto'=scheduler timelimit; 0=unlimited"),
 ):
     setup_logging(1)
+    work_root = Path(f"{library}_work")
+
     if mode == "local":
+        # existing local behavior: fan-out then merge
         return run_step1_local(
             library=library,
             raw_dir=raw_dir,
@@ -159,27 +177,40 @@ def step1_run(
             chunks=threads,
             parallel_jobs=threads,
         )
-    elif mode == "hpc":
-        if chunks is None:
-            chunks = threads
-        plan_path = run_step1_hpc(
-            library=library,
-            raw_dir=raw_dir,
-            design=design,
-            layout=layout,
-            chunks=chunks,
-            follow=follow,
-            poll_interval=poll_interval,
-            max_wait=max_wait,
-        )
-        console.print(f"[bold]Planned[/]: {plan_path}")
-        console.print(
-            "Launch your array jobs separately. Each task runs:\n  "
-            f"scifi-demux step1 worker-chunk --plan {plan_path} --mode hpc"
-            + (f" --design {design}" if design else "")
-        )
+
+    # --- HPC unified behavior (single sbatch array 1..N+1) ---
+    # 1) decide chunk count
+    total_chunks = chunks if chunks is not None else threads
+    if total_chunks < 1:
+        raise typer.BadParameter("--chunks/--threads must be >=1")
+
+    # 2) ensure plan exists (safe to regenerate; plan_chunks is idempotent if files exist)
+    plan = plan_chunks(raw_dir=raw_dir, library=library, work_root=work_root, chunks=total_chunks)
+
+    # 3) identify our array role
+    array_id = _read_array_id_from_env()
+    if array_id is None:
+        # Not running inside an array: be helpful and do the whole thing serially, or nudge.
+        console.print("[yellow]No ARRAY env detected; running all chunks serially then merging.[/]")
+        for idx in range(1, total_chunks + 1):
+            worker_chunk(plan=plan, idx=idx, layout=layout, design=design, mode="hpc")
+        wait_and_maybe_merge(library=library, work_root=work_root, poll_interval=poll_interval, max_wait=max_wait)
+        return
+
+    # 4) roles:
+    #    - 1..N  : chunk workers
+    #    - N+1   : follow+merge+QC
+    if 1 <= array_id <= total_chunks:
+        worker_chunk(plan=plan, idx=array_id, layout=layout, design=design, mode="hpc")
+        return
+    elif array_id == (total_chunks + 1):
+        wait_and_maybe_merge(library=library, work_root=work_root, poll_interval=poll_interval, max_wait=max_wait)
+        return
     else:
-        raise typer.BadParameter("mode must be 'local' or 'hpc'")
+        raise typer.BadParameter(
+            f"Array index {array_id} out of range for chunks={total_chunks}. "
+            f"Submit as --array=1-{total_chunks+1} so last task follows/merges."
+        )
 
 
 @step1_app.command("worker-chunk")
