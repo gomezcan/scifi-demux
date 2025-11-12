@@ -410,6 +410,112 @@ def run_multiqc(work_root: Path, *, config: Optional[Path] = None, out_subdir: s
         print(f"[multiqc] multiqc failed with exit {e.returncode}; continuing")
 
 
+# -------------------- counts-only aggregation (no merge) -----------------
+def _aggregate_counts_only(library: str, work_root: Path) -> Path:
+    """
+    Recompute QC summaries from existing per-chunk metrics and the plan.
+    Does NOT merge or touch FASTQs. Writes TSV/JSON into qc/summary/.
+    Returns the qc/summary directory path.
+    """
+    plan = work_root / PLAN_NAME
+    if not plan.exists():
+        raise FileNotFoundError(f"Plan not found: {plan}")
+
+    qc_dir = work_root / "qc" / "summary"
+    qc_dir.mkdir(parents=True, exist_ok=True)
+    metrics_dir = work_root / "_control" / "metrics"
+
+    rows = [ln for ln in plan.read_text().splitlines() if ln.strip() and not ln.startswith("#")]
+
+    # library accumulators
+    lib_raw_r1 = lib_raw_r3 = 0
+    lib_umi_r1_out = lib_umi_r3_out = 0
+    lib_cut_r1_out = lib_cut_r3_out = 0
+    per_sample = defaultdict(lambda: {"r1": 0, "r3": 0, "passed": 0})
+
+    # raw from split parts listed in plan
+    for ln in rows:
+        # cid  lib  r1p  r2forr1  r3p  r2forr3  out_root
+        parts = ln.split("\t")
+        if len(parts) < 7:
+            continue
+        _, _, r1p, _, r3p, _, _ = parts
+        lib_raw_r1 += _count_fastq_reads(Path(r1p))
+        lib_raw_r3 += _count_fastq_reads(Path(r3p))
+
+    # per-chunk UMI + cutadapt
+    for p in sorted(metrics_dir.glob("chunk_*.umi.json")):
+        try:
+            d = json.loads(p.read_text())
+            lib_umi_r1_out += int(d.get("r1", {}).get("reads_out", 0))
+            lib_umi_r3_out += int(d.get("r3", {}).get("reads_out", 0))
+        except Exception:
+            pass
+
+    for p in sorted(metrics_dir.glob("chunk_*.cutadapt.json")):
+        try:
+            d = json.loads(p.read_text())
+            lib_cut_r1_out += int(d.get("reads_out_r1", 0))
+            lib_cut_r3_out += int(d.get("reads_out_r3", 0))
+        except Exception:
+            pass
+
+    # per-chunk demux assigned/passed per sample
+    for p in sorted(metrics_dir.glob("chunk_*.demux.json")):
+        try:
+            d = json.loads(p.read_text())
+            for smp, v in d.items():
+                per_sample[smp]["r1"] += int(v.get("r1_reads", 0))
+                per_sample[smp]["r3"] += int(v.get("r3_reads", 0))
+                per_sample[smp]["passed"] += int(v.get("passed", 0))
+        except Exception:
+            pass
+
+    # library-level TSV
+    lib_tsv = qc_dir / "library_counts.tsv"
+    with lib_tsv.open("w", newline="") as fh:
+        w = csv.writer(fh, delimiter="\t")
+        w.writerow(["library", "stage", "reads_R1", "reads_R3", "notes"])
+        w.writerow([library, "raw", lib_raw_r1, lib_raw_r3, "from split parts"])
+        w.writerow([library, "umi_attached", lib_umi_r1_out, lib_umi_r3_out, "post umi_tools extract"])
+        w.writerow([library, "cutadapt_named", lib_cut_r1_out, lib_cut_r3_out, "post cutadapt rename/trim"])
+        assigned_r1 = sum(v["r1"] for v in per_sample.values())
+        assigned_r3 = sum(v["r3"] for v in per_sample.values())
+        passed_pairs = sum(v["passed"] for v in per_sample.values())
+        w.writerow([library, "demux_assigned", assigned_r1, assigned_r3, "sum of sample outputs"])
+        w.writerow([library, "demux_passed_pairs", passed_pairs, passed_pairs, "paired min(R1,R3)"])
+
+    # sample-level TSV
+    smp_tsv = qc_dir / "sample_counts.tsv"
+    with smp_tsv.open("w", newline="") as fh:
+        w = csv.writer(fh, delimiter="\t")
+        w.writerow(["sample", "reads_R1", "reads_R3", "passed_pairs"])
+        for smp in sorted(per_sample):
+            w.writerow([smp, per_sample[smp]["r1"], per_sample[smp]["r3"], per_sample[smp]["passed"]])
+
+    # machine-readable JSON
+    _write_json(qc_dir / "counts.json", {
+        "library": library,
+        "library_counts": {
+            "raw": {"R1": lib_raw_r1, "R3": lib_raw_r3},
+            "umi_attached": {"R1": lib_umi_r1_out, "R3": lib_umi_r3_out},
+            "cutadapt_named": {"R1": lib_cut_r1_out, "R3": lib_cut_r3_out},
+            "demux_assigned": {"R1": assigned_r1, "R3": assigned_r3},
+            "demux_passed_pairs": {"pairs": passed_pairs},
+        },
+        "samples": per_sample,
+    })
+
+    # lightweight readme
+    (qc_dir / "README.md").write_text(
+        f"# Step 1 counts — {library}\n\n"
+        f"- Library totals: `library_counts.tsv`\n"
+        f"- Per-sample totals: `sample_counts.tsv`\n"
+        f"- JSON: `counts.json`\n"
+    )
+    return qc_dir
+
+
 # ---------------------------- HPC helper ----------------------------
 
 def run_step1_hpc(
