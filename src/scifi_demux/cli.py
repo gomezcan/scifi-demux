@@ -256,6 +256,18 @@ def step1_missing_indices(work_root: Path = typer.Option(..., help="<LIB>_work d
     typer.echo(",".join(str(i) for i in missing))
 
 
+@step1_app.command("report")
+def step1_report(
+    library: str = typer.Option(...),
+    work_root: Path = typer.Option(..., exists=True),
+):
+    # re-aggregate without re-merging:
+    # factor out the aggregation above into a helper, call it here.
+    from scifi_demux.steps.step1 import _aggregate_counts_only
+    _aggregate_counts_only(library=library, work_root=work_root)
+    console.print(f"[bold green]Wrote[/] counts to {work_root}/qc/summary")
+
+
 # ------------------------------------------------------------------------------------
 # Step 2 (Map + Clean) — placeholders wired to state
 # ------------------------------------------------------------------------------------
