@@ -1,39 +1,56 @@
 # src/scifi_demux/steps/primitives.py
 from __future__ import annotations
-from pathlib import Path
-from typing import Optional, List, Dict, Tuple
-import shutil, subprocess, tempfile, os
-from scifi_demux.demux_core import demux_split_barcodes
+
+import gzip
+import json
+import os
 import re
-from typing import Dict, List, Tuple
-import gzip, io, json
+import shutil
+import subprocess
+import tempfile
+from pathlib import Path
+from typing import Dict, List
+
+from scifi_demux.demux_core import demux_split_barcodes
+
+
+# ----------------------------- utils -----------------------------
+
+def _which_or_raise(*bins: str) -> None:
+    missing = [b for b in bins if shutil.which(b) is None]
+    if missing:
+        raise RuntimeError(f"Missing required executables: {', '.join(missing)}")
+
+
+def _run(cmd: List[str], **popen_kwargs) -> None:
+    print("[CMD]", " ".join(map(str, cmd)))
+    subprocess.run(cmd, check=True, **popen_kwargs)
+
 
 def _count_fastq_reads(fq: Path) -> int:
     """
-    Count reads in a FASTQ(.gz) by counting header lines.
-    Assumes standard 4-line records. Streams gzip to avoid RAM spikes.
+    Count reads in a FASTQ(.gz) by counting lines. Assumes 4 lines per record.
+    Streams gzip to avoid RAM spikes.
     """
     opener = gzip.open if str(fq).endswith(".gz") else open
-    n = 0
-    with opener(fq, "rt", encoding="utf-8", errors="replace") as fh:
-        for i, _ in enumerate(fh, start=1):
-            pass
-    # i is number of lines; 4 lines per read
-    return 0 if i == 0 else i // 4
+    line_count = 0
+    try:
+        with opener(fq, "rt", encoding="utf-8", errors="replace") as fh:
+            for line_count, _ in enumerate(fh, start=1):
+                pass
+    except FileNotFoundError:
+        return 0
+    if line_count == 0:
+        return 0
+    return line_count // 4
+
 
 def _write_json(p: Path, obj: dict) -> None:
     p.parent.mkdir(parents=True, exist_ok=True)
     p.write_text(json.dumps(obj, indent=2) + "\n")
 
 
-def _which_or_raise(*bins: str):
-    missing = [b for b in bins if shutil.which(b) is None]
-    if missing:
-        raise RuntimeError(f"Missing required executables: {', '.join(missing)}")
-
-def _run(cmd: List[str], **popen_kwargs):
-    print("[CMD]", " ".join(map(str, cmd)))
-    subprocess.run(cmd, check=True, **popen_kwargs)
+# --------------------------- primitives --------------------------
 
 def umi_extract_pair(
     *,
@@ -44,50 +61,56 @@ def umi_extract_pair(
     threads: int = 8,
     do_chunking: bool = False,
     chunks: int = 20,
-):
+) -> Dict[str, int]:
     """
     Extract barcode/UMI from mate_in (R2) and append to read_keep (R1 or R3) names.
-    Writes compressed FASTQ to out_fastq_gz. Logs go to stderr (not captured in stdout logs).
+    Writes compressed FASTQ to out_fastq_gz. UMI-tools logs are redirected to a file
+    to keep SLURM logs clean.
+
+    Returns:
+        {"reads_in": int, "reads_out": int}
     """
     _which_or_raise("umi_tools", "pigz")
     out_fastq_gz.parent.mkdir(parents=True, exist_ok=True)
 
-    # temp plain-FASTQ (umi_tools can't write gz directly); compress after
-    tmp_out = out_fastq_gz.with_suffix("")  # strip .gz → *.fastq
+    # temp plain-FASTQ (umi_tools writes plain; we compress afterward)
+    tmp_out = out_fastq_gz.with_suffix("")  # strip .gz if present
     if tmp_out.suffix != ".fastq":
         tmp_out = tmp_out.with_suffix(".fastq")
-        
-    # per-chunk umi log file lives alongside output
+
     log_path = out_fastq_gz.with_name(out_fastq_gz.name + ".umi.log")
 
     if not do_chunking:
-        # ---- simple path: write read2 to a temp plain FASTQ, then compress ----
-        tmp_out = out_fastq_gz.with_suffix("")  # e.g. .../part_002_R1.bc1.fastq
+        # simple path
         _run([
             "umi_tools", "extract",
             f"--bc-pattern={umi_pattern}",
-            f"--stdin={str(mate_in)}",      # R2 (UMI source)
-            f"--read2-in={str(read_keep)}", # keep (R1 or R3)
-            f"--read2-out={str(tmp_out)}",  # write KEEP here (plain FASTQ)            
-            "-S", "/dev/null",
+            f"--stdin={str(mate_in)}",           # R2 (UMI source)
+            f"--read2-in={str(read_keep)}",      # keep (R1 or R3)
+            f"--read2-out={str(tmp_out)}",       # write KEEP here (plain FASTQ)
+            "-S", "/dev/null",                   # discard read1 stream
+            "--log", str(log_path),
+            "--log2stderr",                      # log to file + stderr flag present but log file wins
         ])
+        # compress
         with open(out_fastq_gz, "wb") as fout:
-            subprocess.run(["pigz", "-p", str(threads), "-c", str(tmp_out)],
-                           check=True, stdout=fout)
+            subprocess.run(["pigz", "-p", str(threads), "-c", str(tmp_out)], check=True, stdout=fout)
         try:
             tmp_out.unlink()
         except FileNotFoundError:
             pass
-        return
+        reads_out = _count_fastq_reads(out_fastq_gz)
+        reads_in = _count_fastq_reads(read_keep)
+        return {"reads_in": reads_in, "reads_out": reads_out}
 
-    # Large-file path: chunk read_keep and mate_in together → per-chunk extract → concat → gzip
+    # large-file path: chunk then per-chunk extract, concat, compress
     _which_or_raise("seqkit", "parallel")
-    with tempfile.TemporaryDirectory() as tdir:
-        tdir = Path(tdir)
+    with tempfile.TemporaryDirectory() as tdir_:
+        tdir = Path(tdir_)
         chunks_dir = tdir / "chunks"
-        chunks_dir.mkdir()
+        chunks_dir.mkdir(parents=True, exist_ok=True)
 
-        # Split the two inputs in lockstep (ensures matching chunk boundaries)
+        # Split the two inputs in lockstep
         _run([
             "seqkit", "split2", "--by-part", str(chunks), "-j", str(threads),
             "-O", str(chunks_dir),
@@ -95,37 +118,31 @@ def umi_extract_pair(
             "-2", str(mate_in),      # barcode stream (R2)
         ])
 
+        # Concatenate plain FASTQ parts emitted by umi_tools into tmp_concat
         tmp_concat = tdir / "concat.fastq"
         with open(tmp_concat, "wb") as cat:
-            # Gather keep chunks (either *_R1.part_* or *_R3.part_*)
-            keep_chunks = sorted(list(chunks_dir.glob("*_R1*.fastq.gz")) + list(chunks_dir.glob("*_R3*.fastq.gz")))
+            keep_chunks = sorted(list(chunks_dir.glob("*_R1.part_*.fastq.gz")) + list(chunks_dir.glob("*_R3.part_*.fastq.gz")))
             if not keep_chunks:
                 raise FileNotFoundError(f"No keep-chunks found in {chunks_dir}")
 
             for keep_chunk in keep_chunks:
-                # Match its R2 mate chunk (regardless of keep being R1 or R3)
-                mate_chunk = Path(str(keep_chunk).replace("_R1.", "_R2.").replace("_R3.", "_R2."))
+                # find the mate chunk (R2) for this keep chunk
+                mate_chunk = Path(str(keep_chunk).replace("_R1.part_", "_R2.part_").replace("_R3.part_", "_R2.part_"))
                 if not mate_chunk.exists():
                     raise FileNotFoundError(f"Mate chunk not found for {keep_chunk.name}; expected {mate_chunk.name}")
 
-                # Emit modified read2 to stdout, capture to a temp file; then append to concat
-                p1 = subprocess.Popen([
+                tmp_chunk = tdir / (keep_chunk.stem + ".bc1.fastq")
+                _run([
                     "umi_tools", "extract",
                     f"--bc-pattern={umi_pattern}",
-                    f"--stdin={str(mate_chunk)}",   # R2
-                    f"--read2-in={str(keep_chunk)}",# R1/R3
-                    "--read2-out=-",
-                ], stdout=subprocess.PIPE)
-                tmp_chunk = tdir / (keep_chunk.stem + ".bc1.fastq")
-                with open(tmp_chunk, "wb") as fout:
-                    p2 = subprocess.Popen(["gzip", "-dc"], stdin=p1.stdout, stdout=subprocess.PIPE)  # if umi_tools ever gz-compresses, normalize
-                    p1.stdout.close()
-                    # directly write umi_tools stdout to file (no re-compress here)
-                    # Actually p2 above is just a safeguard; usually umi_tools emits plain FASTQ
-                    # so we can simply read from p1 if desired; keeping minimal here:
-                    p1_ret = p1.wait()
-                    # if we had used piping, we'd also wait p2; omitted for simplicity
-                # Append to concat
+                    f"--stdin={str(mate_chunk)}",      # R2
+                    f"--read2-in={str(keep_chunk)}",   # R1/R3
+                    f"--read2-out={str(tmp_chunk)}",   # plain FASTQ
+                    "-S", "/dev/null",
+                    "--log", str(log_path),
+                    "--log2stderr",
+                ])
+                # append to concat
                 with open(tmp_chunk, "rb") as fin:
                     shutil.copyfileobj(fin, cat)
                 tmp_chunk.unlink(missing_ok=True)
@@ -133,107 +150,105 @@ def umi_extract_pair(
         with open(out_fastq_gz, "wb") as fout:
             subprocess.run(["pigz", "-p", str(threads), "-c", str(tmp_concat)], check=True, stdout=fout)
         tmp_concat.unlink(missing_ok=True)
-        
-        # inpout for multi-QC like summary 
-        reads_out = _count_fastq_reads(out_fastq_gz)
-        # input count: we count the READ-TO-KEEP (R1 or R3) to keep semantics consistent
-        reads_in = _count_fastq_reads(read_keep)
-        return {"reads_in": reads_in, "reads_out": reads_out}
 
+    reads_out = _count_fastq_reads(out_fastq_gz)
+    reads_in = _count_fastq_reads(read_keep)
+    return {"reads_in": reads_in, "reads_out": reads_out}
 
 
 def cutadapt_append_tn5_to_name(
     r1_in: Path, r3_in: Path,
     r1_out: Path, r3_out: Path,
     threads: int = 4,
-):
+) -> Dict[str, int]:
     """
-    Append split Tn5 halves into read name; trim 5/5; clip adapters.
-    Preserves original semantics (rename + ME removal), adds only safe guards.
+    Append split Tn5 halves into read name; fixed 5' clipping; adapter trim.
+    Returns read counts from outputs for QC aggregation.
     """
     _which_or_raise("cutadapt")
     r1_out.parent.mkdir(parents=True, exist_ok=True)
     r3_out.parent.mkdir(parents=True, exist_ok=True)
 
-    # choose JSON path next to outputs (per-chunk)
     json_log = r1_out.with_suffix("").with_suffix(".cutadapt.json")
-    
+
     _run([
         "cutadapt",
         "-e", "0.2",
         "--pair-filter=any",
         "-j", str(threads),
 
-        # --- keep your exact renaming semantics
+        # rename semantics: include cut prefixes from both reads
         "--rename", "{id}_{r1.cut_prefix}_{r2.cut_prefix} {comment}",
 
-        # --- your fixed 5' clipping on both reads
+        # fixed 5' clipping
         "-u", "5", "-U", "5",
 
-        # --- your ME/EM sequence trimming (leave exactly as you provided)
+        # ME trimming (keep exactly as desired)
         "-g", "AGATGTGTATAAGAGACAG",
         "-G", "AGATGTGTATAAGAGACAG",
 
-        # --- SAFE guards that don't change intended behavior
-        "--report=minimal",             # keep logs small
+        "--report=minimal",
+        f"--json={str(json_log)}",
 
-        # outputs
         "-o", str(r1_out),
         "-p", str(r3_out),
-        "-f"--json={str(json_log)}",
 
-        # inputs (R1 first, then R3)
+        # inputs
         str(r1_in), str(r3_in),
     ])
-    # parse JSON for read counts if present; else fallback
-    try:
-        data = json.loads(json_log.read_text())
-        # Cutadapt JSON has keys like "read_counts": {"input": N, "output": M} for R1/R2;
-        # here we just count outputs we actually wrote.
-        out_r1 = _count_fastq_reads(r1_out)
-        out_r3 = _count_fastq_reads(r3_out)
-        return {"reads_out_r1": out_r1, "reads_out_r3": out_r3}
-    except Exception:
-        return {
-            "reads_out_r1": _count_fastq_reads(r1_out),
-            "reads_out_r3": _count_fastq_reads(r3_out),
-        }
+
+    # parse JSON if available; still count outputs as source of truth
+    out_r1 = _count_fastq_reads(r1_out)
+    out_r3 = _count_fastq_reads(r3_out)
+    return {"reads_out_r1": out_r1, "reads_out_r3": out_r3}
 
 
-def demux_by_split_bc(layout_file: Path, sample_well_map: Path, input_fastq_gz: Path, out_dir: Path):
-    """Backwards-compatible shim that calls the in-package demux function."""
+def demux_by_split_bc(layout_file: Path, sample_well_map: Path, input_fastq_gz: Path, out_dir: Path) -> Dict[str, Dict[str, int]]:
+    """
+    Backwards-compatible shim calling the demux core, then counting per-sample outputs.
+
+    Returns:
+        { "<sample>": { "r1_reads": int, "r3_reads": int, "passed": int } }
+    """
     demux_split_barcodes(layout_file, input_fastq_gz, sample_well_map, output_dir=out_dir)
-    per_sample = {}
-    # after writing per-sample files, count:
+
+    per_sample: Dict[str, Dict[str, int]] = {}
     for smp_dir in sorted(out_dir.glob("*")):
-        if not smp_dir.is_dir(): continue
+        if not smp_dir.is_dir():
+            continue
         r1 = next(smp_dir.glob("*_R1.bc1.bc2.fastq.gz"), None)
         r3 = next(smp_dir.glob("*_R3.bc1.bc2.fastq.gz"), None)
         r1c = _count_fastq_reads(r1) if r1 else 0
         r3c = _count_fastq_reads(r3) if r3 else 0
-        # "passed" = min(R1,R3) pairs effectively passing demux/correction
         per_sample[smp_dir.name] = {"r1_reads": r1c, "r3_reads": r3c, "passed": min(r1c, r3c)}
     return per_sample
 
 
+# ------------------------ demux parts → merge --------------------
+
 _PART_RE = re.compile(r"^part_(\d+)_R([13])\.bc1\.bc2_(.+)\.fastq\.gz$")
+
 
 def _scan_demux_parts(corr_dir: Path) -> Dict[str, Dict[str, List[Path]]]:
     """
     Return {sample: {"R1": [parts...], "R3": [parts...]}} discovered under corr_dir.
+    Expected filenames: part_###_R[13].bc1.bc2_<sample>.fastq.gz
     """
     by_sample: Dict[str, Dict[str, List[Path]]] = {}
     for p in corr_dir.glob("part_*_R*.bc1.bc2_*.fastq.gz"):
         m = _PART_RE.match(p.name)
         if not m:
             continue
-        chunk_id, read, sample = int(m.group(1)), f"R{m.group(2)}", m.group(3)
+        read = f"R{m.group(2)}"
+        sample = m.group(3)
         d = by_sample.setdefault(sample, {"R1": [], "R3": []})
         d[read].append(p)
-    # sort parts by numeric chunk id embedded in filename
+
+    # sort parts by numeric chunk id
     def _key(path: Path) -> int:
         m = _PART_RE.match(path.name)
         return int(m.group(1)) if m else 0
+
     for sample in by_sample:
         by_sample[sample]["R1"].sort(key=_key)
         by_sample[sample]["R3"].sort(key=_key)
@@ -275,22 +290,29 @@ def merge_demuxed_chunks(
             dst = out_dir / f"{sample}_{read}.bc1.bc2.fastq.gz"
             if dst.exists() and not overwrite:
                 raise FileExistsError(f"{dst} exists and overwrite=False")
-            # Concatenate gzip members (valid & stream-safe)
-            total = 0
+
+            # Concatenate gzip members correctly and track bytes
+            total_bytes = 0
             with open(dst, "wb") as fout:
                 for part in parts:
                     with open(part, "rb") as fin:
-                        total += shutil.copyfileobj(fin, fout) or 0
-            sample_sum[read] = {"parts": len(parts), "bytes": int(total)}
+                        # copyfileobj returns None; manually count bytes
+                        buf = fin.read(1024 * 1024)
+                        while buf:
+                            fout.write(buf)
+                            total_bytes += len(buf)
+                            buf = fin.read(1024 * 1024)
+
+            sample_sum[read] = {"parts": len(parts), "bytes": int(total_bytes)}
+
             if not keep_parts:
                 for part in parts:
-                    try: part.unlink()
-                    except FileNotFoundError: pass
+                    try:
+                        part.unlink()
+                    except FileNotFoundError:
+                        pass
+
         if sample_sum:
             summary[sample] = sample_sum
 
     return summary
-    
-
-
-
