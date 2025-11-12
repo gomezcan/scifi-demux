@@ -68,10 +68,24 @@ def step1_plan(
     library: str = typer.Option(...),
     raw_dir: Path = typer.Option(..., exists=True, file_okay=False),
     chunks: int = typer.Option(..., help="Number of chunks to split into"),
+    work_root: Path = typer.Option(None, help="Work directory; defaults to '<library>_work'"),
 ):
-    work_root = Path(f"{library}_work")
-    plan = plan_chunks(raw_dir=raw_dir, library=library, work_root=work_root, chunks=chunks)
-    typer.echo(str(plan))
+    # default to "<library>_work" if not provided
+    if work_root is None:
+        work_root = Path(f"{library}_work")
+
+    work_root.mkdir(parents=True, exist_ok=True)
+
+    plan = plan_chunks(
+        raw_dir=raw_dir,
+        library=library,
+        work_root=work_root,
+        chunks=chunks,
+    )
+
+    # print absolute path for robustness in shell scripts
+    typer.echo(str(plan.resolve()))
+
     
 @step1_app.command("run")
 def step1_run(
