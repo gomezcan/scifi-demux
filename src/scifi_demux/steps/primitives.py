@@ -1,11 +1,30 @@
 # src/scifi_demux/steps/primitives.py
 from __future__ import annotations
 from pathlib import Path
-from typing import Optional, List
+from typing import Optional, List, Dict, Tuple
 import shutil, subprocess, tempfile, os
 from scifi_demux.demux_core import demux_split_barcodes
 import re
 from typing import Dict, List, Tuple
+import gzip, io, json
+
+def _count_fastq_reads(fq: Path) -> int:
+    """
+    Count reads in a FASTQ(.gz) by counting header lines.
+    Assumes standard 4-line records. Streams gzip to avoid RAM spikes.
+    """
+    opener = gzip.open if str(fq).endswith(".gz") else open
+    n = 0
+    with opener(fq, "rt", encoding="utf-8", errors="replace") as fh:
+        for i, _ in enumerate(fh, start=1):
+            pass
+    # i is number of lines; 4 lines per read
+    return 0 if i == 0 else i // 4
+
+def _write_json(p: Path, obj: dict) -> None:
+    p.parent.mkdir(parents=True, exist_ok=True)
+    p.write_text(json.dumps(obj, indent=2) + "\n")
+
 
 def _which_or_raise(*bins: str):
     missing = [b for b in bins if shutil.which(b) is None]
@@ -114,6 +133,13 @@ def umi_extract_pair(
         with open(out_fastq_gz, "wb") as fout:
             subprocess.run(["pigz", "-p", str(threads), "-c", str(tmp_concat)], check=True, stdout=fout)
         tmp_concat.unlink(missing_ok=True)
+        
+        # inpout for multi-QC like summary 
+        reads_out = _count_fastq_reads(out_fastq_gz)
+        # input count: we count the READ-TO-KEEP (R1 or R3) to keep semantics consistent
+        reads_in = _count_fastq_reads(read_keep)
+        return {"reads_in": reads_in, "reads_out": reads_out}
+
 
 
 def cutadapt_append_tn5_to_name(
@@ -129,6 +155,9 @@ def cutadapt_append_tn5_to_name(
     r1_out.parent.mkdir(parents=True, exist_ok=True)
     r3_out.parent.mkdir(parents=True, exist_ok=True)
 
+    # choose JSON path next to outputs (per-chunk)
+    json_log = r1_out.with_suffix("").with_suffix(".cutadapt.json")
+    
     _run([
         "cutadapt",
         "-e", "0.2",
@@ -151,15 +180,40 @@ def cutadapt_append_tn5_to_name(
         # outputs
         "-o", str(r1_out),
         "-p", str(r3_out),
+        "-f"--json={str(json_log)}",
 
         # inputs (R1 first, then R3)
         str(r1_in), str(r3_in),
     ])
+    # parse JSON for read counts if present; else fallback
+    try:
+        data = json.loads(json_log.read_text())
+        # Cutadapt JSON has keys like "read_counts": {"input": N, "output": M} for R1/R2;
+        # here we just count outputs we actually wrote.
+        out_r1 = _count_fastq_reads(r1_out)
+        out_r3 = _count_fastq_reads(r3_out)
+        return {"reads_out_r1": out_r1, "reads_out_r3": out_r3}
+    except Exception:
+        return {
+            "reads_out_r1": _count_fastq_reads(r1_out),
+            "reads_out_r3": _count_fastq_reads(r3_out),
+        }
 
 
 def demux_by_split_bc(layout_file: Path, sample_well_map: Path, input_fastq_gz: Path, out_dir: Path):
     """Backwards-compatible shim that calls the in-package demux function."""
     demux_split_barcodes(layout_file, input_fastq_gz, sample_well_map, output_dir=out_dir)
+    per_sample = {}
+    # after writing per-sample files, count:
+    for smp_dir in sorted(out_dir.glob("*")):
+        if not smp_dir.is_dir(): continue
+        r1 = next(smp_dir.glob("*_R1.bc1.bc2.fastq.gz"), None)
+        r3 = next(smp_dir.glob("*_R3.bc1.bc2.fastq.gz"), None)
+        r1c = _count_fastq_reads(r1) if r1 else 0
+        r3c = _count_fastq_reads(r3) if r3 else 0
+        # "passed" = min(R1,R3) pairs effectively passing demux/correction
+        per_sample[smp_dir.name] = {"r1_reads": r1c, "r3_reads": r3c, "passed": min(r1c, r3c)}
+    return per_sample
 
 
 _PART_RE = re.compile(r"^part_(\d+)_R([13])\.bc1\.bc2_(.+)\.fastq\.gz$")
