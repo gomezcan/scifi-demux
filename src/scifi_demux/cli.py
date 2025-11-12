@@ -143,8 +143,13 @@ def step1_plan(
     library: str = typer.Option(...),
     raw_dir: Path = typer.Option(..., exists=True, file_okay=False),
     chunks: int = typer.Option(..., help="Number of chunks to split into"),
+    work_root: Path = typer.Option(None, help="Work directory; defaults to '<library>_work'"),
 ):
-    work_root = Path(f"{library}_work")
+    # default to "<library>_work" if not provided
+    if work_root is None:
+        work_root = Path(f"{library}_work")
+    
+    work_root.mkdir(parents=True, exist_ok=True)
     plan = plan_chunks(raw_dir=raw_dir, library=library, work_root=work_root, chunks=chunks)
     typer.echo(str(plan))
 
@@ -152,66 +157,79 @@ def step1_plan(
 @step1_app.command("run")
 def step1_run(
     library: str = typer.Option(..., help="Library / FASTQ prefix"),
-    raw_dir: Path = typer.Option(Path("."), help="Dir with {lib}_R[1,2,3].fastq.gz"),
+    raw_dir: Path = typer.Option(..., exists=True, file_okay=False, dir_okay=True,
+                                 help="Dir with {library}_R[1,2,3].fastq.gz"),
     design: Optional[Path] = typer.Option(None, help="PlateDesign_*.txt; omit for per-well outputs"),
-    layout: str = typer.Option("builtin", help="Tn5 layout file or 'builtin'"),
+    layout: Optional[Path] = typer.Option(None, help="Tn5 layout file; omit for builtin"),
     mode: str = typer.Option("local", help="local|hpc"),
-    # local fan-out (and default for HPC if --chunks omitted)
-    threads: int = typer.Option(8, help="LOCAL: number of chunks & parallel workers; HPC default when --chunks omitted"),
-    # explicit chunk count for HPC if you want different from --threads
-    chunks: Optional[int] = typer.Option(None, help="HPC: total chunks (defaults to --threads if omitted)"),
-    # follow/QC knobs (used by the 'follow' task in HPC or after local run)
-    follow: bool = typer.Option(False, help="LOCAL: merge/QC after fan-out; HPC: ignored for array roles (auto)"),
+    threads: int = typer.Option(8, help="LOCAL: parallel jobs; HPC default chunk count if --chunks omitted"),
+    chunks: Optional[int] = typer.Option(None, help="HPC: total chunks (defaults to --threads)"),
+    follow: bool = typer.Option(False, help="LOCAL: merge/QC after fan-out; HPC: ignored"),
     poll_interval: int = typer.Option(60, help="Seconds between progress checks"),
     max_wait: str = typer.Option("auto", help="Max wait (e.g., 12h, 3600s). 'auto'=scheduler timelimit; 0=unlimited"),
+    work_root: Optional[Path] = typer.Option(None, help="Work directory; defaults to '<library>_work'"),
 ):
     setup_logging(1)
-    work_root = Path(f"{library}_work")
 
+    # defaults and validation
+    if work_root is None:
+        work_root = Path(f"{library}_work")
+    work_root.mkdir(parents=True, exist_ok=True)
+
+    if design is not None and not design.exists():
+        raise typer.BadParameter(f"--design not found: {design}")
+    if layout is not None and not layout.exists():
+        raise typer.BadParameter(f"--layout not found: {layout}")
+
+    # LOCAL fan-out → merge
     if mode == "local":
-        # existing local behavior: fan-out then merge
-        return run_step1_local(
-            library=library,
-            raw_dir=raw_dir,
-            design=design,
-            layout=layout,
-            chunks=threads,
-            parallel_jobs=threads,
-        )
+        total_chunks = max(1, threads)
+        # plan once; reuse if present
+        plan = plan_chunks(raw_dir=raw_dir, library=library, work_root=work_root, chunks=total_chunks)
+        for idx in range(1, total_chunks + 1):
+            worker_chunk(plan=plan, idx=idx, layout=("builtin" if layout is None else str(layout)),
+                         design=design, mode="local")
+        if follow:
+            wait_and_maybe_merge(library=library, work_root=work_root,
+                                 poll_interval=poll_interval, max_wait=max_wait)
+        return
 
-    # --- HPC unified behavior (single sbatch array 1..N+1) ---
-    # 1) decide chunk count
-    total_chunks = chunks if chunks is not None else threads
+    # HPC array mode
+    total_chunks = chunks if chunks is not None else max(1, threads)
     if total_chunks < 1:
         raise typer.BadParameter("--chunks/--threads must be >=1")
 
-    # 2) ensure plan exists (safe to regenerate; plan_chunks is idempotent if files exist)
-    plan = plan_chunks(raw_dir=raw_dir, library=library, work_root=work_root, chunks=total_chunks)
-
-    # 3) identify our array role
-    array_id = _read_array_id_from_env()
-    if array_id is None:
-        # Not running inside an array: be helpful and do the whole thing serially, or nudge.
-        console.print("[yellow]No ARRAY env detected; running all chunks serially then merging.[/]")
-        for idx in range(1, total_chunks + 1):
-            worker_chunk(plan=plan, idx=idx, layout=layout, design=design, mode="hpc")
-        wait_and_maybe_merge(library=library, work_root=work_root, poll_interval=poll_interval, max_wait=max_wait)
-        return
-
-    # 4) roles:
-    #    - 1..N  : chunk workers
-    #    - N+1   : follow+merge+QC
-    if 1 <= array_id <= total_chunks:
-        worker_chunk(plan=plan, idx=array_id, layout=layout, design=design, mode="hpc")
-        return
-    elif array_id == (total_chunks + 1):
-        wait_and_maybe_merge(library=library, work_root=work_root, poll_interval=poll_interval, max_wait=max_wait)
-        return
+    # create or reuse plan
+    plan_path = work_root / "run_plan.step1.chunks.tsv"
+    if not plan_path.exists():
+        plan_path = plan_chunks(raw_dir=raw_dir, library=library, work_root=work_root, chunks=total_chunks)
     else:
-        raise typer.BadParameter(
-            f"Array index {array_id} out of range for chunks={total_chunks}. "
-            f"Submit as --array=1-{total_chunks+1} so last task follows/merges."
-        )
+        plan_path = plan_path.resolve()
+
+    array_id = _read_array_id_from_env()  # expects 1-based SLURM_ARRAY_TASK_ID
+    if array_id is None:
+        typer.echo("[warn] No array env detected; running all chunks serially then merging.")
+        for idx in range(1, total_chunks + 1):
+            worker_chunk(plan=plan_path, idx=idx, layout=("builtin" if layout is None else str(layout)),
+                         design=design, mode="hpc")
+        wait_and_maybe_merge(library=library, work_root=work_root,
+                             poll_interval=poll_interval, max_wait=max_wait)
+        return
+
+    # Roles: 1..N workers, N+1 follow/merge
+    if 1 <= array_id <= total_chunks:
+        worker_chunk(plan=plan_path, idx=array_id, layout=("builtin" if layout is None else str(layout)),
+                     design=design, mode="hpc")
+        return
+    if array_id == total_chunks + 1:
+        wait_and_maybe_merge(library=library, work_root=work_root,
+                             poll_interval=poll_interval, max_wait=max_wait)
+        return
+
+    raise typer.BadParameter(
+        f"Array index {array_id} out of range for chunks={total_chunks}. "
+        f"Submit as --array=1-{total_chunks+1} so the last task merges."
+    )
 
 
 @step1_app.command("worker-chunk")
