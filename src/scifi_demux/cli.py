@@ -153,6 +153,16 @@ def step1_plan(
     plan = plan_chunks(raw_dir=raw_dir, library=library, work_root=work_root, chunks=chunks)
     typer.echo(str(plan))
 
+def _validate_layout(value: str) -> str:
+    # Accept the sentinel keyword
+    if value == "builtin":
+        return "builtin"
+    # Otherwise require an existing file
+    p = Path(value)
+    if not p.exists() or not p.is_file():
+        raise typer.BadParameter(f"--layout must be 'builtin' or a readable file. Not found: {value}")
+    return str(p.resolve())
+
 @step1_app.command("run")
 def step1_run(
     library: str = typer.Option(..., help="Library / FASTQ prefix"),
