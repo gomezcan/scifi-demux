@@ -420,9 +420,17 @@ def run_multiqc(work_root: Path, *, config: Optional[Path] = None, out_subdir: s
     """
     out_dir = work_root / out_subdir
     out_dir.mkdir(parents=True, exist_ok=True)
-    cmd = ["multiqc", "--outdir", str(out_dir), str(work_root)]
+
+    # optional sample-name remap created in merge_library()
+    sample_names = work_root / "qc" / "summary" / "multiqc_samples.tsv"
+
+    cmd = ["multiqc"]
     if config:
-        cmd[1:1] = ["--config", str(config)]
+        cmd += ["--config", str(config)]
+    if sample_names.exists():
+        cmd += ["--sample-names", str(sample_names)]
+    cmd += ["--outdir", str(out_dir), str(work_root)]
+
     try:
         subprocess.run(cmd, check=True)
         print(f"[multiqc] wrote report to {out_dir}")
