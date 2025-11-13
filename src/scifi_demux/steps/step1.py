@@ -250,6 +250,28 @@ def merge_library(library: str, work_root: Path) -> None:
         for smp in sorted(per_sample):
             w.writerow([smp, per_sample[smp]["r1"], per_sample[smp]["r3"], per_sample[smp]["passed"]])
 
+    # New: per-sample read pairs and fraction of library (for MultiQC barplots)
+    pairs_tsv = qc_dir / "sample_pairs.tsv"
+    fracs_tsv = qc_dir / "sample_pairs_fraction.tsv"
+    
+    # define library “pair” count as min(R1,R3) at raw stage
+    lib_pairs_raw = min(lib_raw_r1, lib_raw_r3) if (lib_raw_r1 and lib_raw_r3) else 0
+
+    with pairs_tsv.open("w", newline="") as fh:
+        w = csv.writer(fh, delimiter="\t")
+        w.writerow(["sample", "read_pairs"])
+        for smp in sorted(per_sample):
+            w.writerow([smp, per_sample[smp]["passed"]])
+
+    with fracs_tsv.open("w", newline="") as fh:
+        w = csv.writer(fh, delimiter="\t")
+        w.writerow(["sample", "fraction"])
+        for smp in sorted(per_sample):
+            passed = per_sample[smp]["passed"]
+            frac = passed / lib_pairs_raw if lib_pairs_raw > 0 else 0.0
+            w.writerow([smp, f"{frac:.6f}"])
+
+    
     # Combined JSON
     _write_json(qc_dir / "counts.json", {
         "library": library,
@@ -492,6 +514,25 @@ def _aggregate_counts_only(library: str, work_root: Path) -> Path:
         w.writerow(["sample", "reads_R1", "reads_R3", "passed_pairs"])
         for smp in sorted(per_sample):
             w.writerow([smp, per_sample[smp]["r1"], per_sample[smp]["r3"], per_sample[smp]["passed"]])
+
+    # New: per-sample read pairs and fraction of library (for MultiQC)
+    pairs_tsv = qc_dir / "sample_pairs.tsv"
+    fracs_tsv = qc_dir / "sample_pairs_fraction.tsv"
+    lib_pairs_raw = min(lib_raw_r1, lib_raw_r3) if (lib_raw_r1 and lib_raw_r3) else 0
+
+    with pairs_tsv.open("w", newline="") as fh:
+        w = csv.writer(fh, delimiter="\t")
+        w.writerow(["sample", "read_pairs"])
+        for smp in sorted(per_sample):
+            w.writerow([smp, per_sample[smp]["passed"]])
+
+    with fracs_tsv.open("w", newline="") as fh:
+        w = csv.writer(fh, delimiter="\t")
+        w.writerow(["sample", "fraction"])
+        for smp in sorted(per_sample):
+            passed = per_sample[smp]["passed"]
+            frac = passed / lib_pairs_raw if lib_pairs_raw > 0 else 0.0
+            w.writerow([smp, f"{frac:.6f}"])
 
     # machine-readable JSON
     _write_json(qc_dir / "counts.json", {
