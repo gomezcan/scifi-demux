@@ -153,14 +153,18 @@ def step1_plan(
     plan = plan_chunks(raw_dir=raw_dir, library=library, work_root=work_root, chunks=chunks)
     typer.echo(str(plan))
 
-
 @step1_app.command("run")
 def step1_run(
     library: str = typer.Option(..., help="Library / FASTQ prefix"),
     raw_dir: Path = typer.Option(..., exists=True, file_okay=False, dir_okay=True,
                                  help="Dir with {library}_R[1,2,3].fastq.gz"),
     design: Optional[Path] = typer.Option(None, help="PlateDesign_*.txt; omit for per-well outputs"),
-    layout: Optional[Path] = typer.Option(None, help="Tn5 layout file; omit for builtin"),
+    layout: str = typer.Option(
+        "builtin",
+        callback=_validate_layout,  # accepts 'builtin' or resolves a readable file path
+        help="Tn5 layout: 'builtin' (sci-fi-ATAC default) or path to a layout file",
+        show_default=True,
+    ),
     mode: str = typer.Option("local", help="local|hpc"),
     threads: int = typer.Option(8, help="LOCAL: parallel jobs; HPC default chunk count if --chunks omitted"),
     chunks: Optional[int] = typer.Option(None, help="HPC: total chunks (defaults to --threads)"),
@@ -171,55 +175,55 @@ def step1_run(
 ):
     setup_logging(1)
 
-    # defaults and validation
+    # normalize work_root
     if work_root is None:
         work_root = Path(f"{library}_work")
     work_root.mkdir(parents=True, exist_ok=True)
 
+    # validate optional inputs
     if design is not None and not design.exists():
         raise typer.BadParameter(f"--design not found: {design}")
-    if layout is not None and not layout.exists():
-        raise typer.BadParameter(f"--layout not found: {layout}")
 
-    # LOCAL fan-out → merge
+    # LOCAL fan-out → optional merge
     if mode == "local":
         total_chunks = max(1, threads)
-        # plan once; reuse if present
-        plan = plan_chunks(raw_dir=raw_dir, library=library, work_root=work_root, chunks=total_chunks)
+        plan_path = work_root / "run_plan.step1.chunks.tsv"
+        if not plan_path.exists():
+            plan_path = plan_chunks(raw_dir=raw_dir, library=library, work_root=work_root, chunks=total_chunks)
+        else:
+            plan_path = plan_path.resolve()
+
         for idx in range(1, total_chunks + 1):
-            worker_chunk(plan=plan, idx=idx, layout=("builtin" if layout is None else str(layout)),
-                         design=design, mode="local")
+            worker_chunk(plan=plan_path, idx=idx, layout=layout, design=design, mode="local")
+
         if follow:
             wait_and_maybe_merge(library=library, work_root=work_root,
                                  poll_interval=poll_interval, max_wait=max_wait)
         return
 
-    # HPC array mode
+    # HPC array mode (workers 1..N, merge at N+1)
     total_chunks = chunks if chunks is not None else max(1, threads)
     if total_chunks < 1:
-        raise typer.BadParameter("--chunks/--threads must be >=1")
+        raise typer.BadParameter("--chunks/--threads must be >= 1")
 
-    # create or reuse plan
     plan_path = work_root / "run_plan.step1.chunks.tsv"
     if not plan_path.exists():
         plan_path = plan_chunks(raw_dir=raw_dir, library=library, work_root=work_root, chunks=total_chunks)
     else:
         plan_path = plan_path.resolve()
 
-    array_id = _read_array_id_from_env()  # expects 1-based SLURM_ARRAY_TASK_ID
+    array_id = _read_array_id_from_env()  # 1-based SLURM_ARRAY_TASK_ID expected
     if array_id is None:
         typer.echo("[warn] No array env detected; running all chunks serially then merging.")
         for idx in range(1, total_chunks + 1):
-            worker_chunk(plan=plan_path, idx=idx, layout=("builtin" if layout is None else str(layout)),
-                         design=design, mode="hpc")
+            worker_chunk(plan=plan_path, idx=idx, layout=layout, design=design, mode="hpc")
         wait_and_maybe_merge(library=library, work_root=work_root,
                              poll_interval=poll_interval, max_wait=max_wait)
         return
 
-    # Roles: 1..N workers, N+1 follow/merge
+    # Roles: 1..N workers, N+1 merge/QC
     if 1 <= array_id <= total_chunks:
-        worker_chunk(plan=plan_path, idx=array_id, layout=("builtin" if layout is None else str(layout)),
-                     design=design, mode="hpc")
+        worker_chunk(plan=plan_path, idx=array_id, layout=layout, design=design, mode="hpc")
         return
     if array_id == total_chunks + 1:
         wait_and_maybe_merge(library=library, work_root=work_root,
