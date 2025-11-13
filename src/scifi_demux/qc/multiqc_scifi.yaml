@@ -1,0 +1,27 @@
+# scifi-demux MultiQC configuration
+
+# You can keep adding stuff later; for now we only define custom plots
+custom_content:
+  - section_name: "Step 1 — demultiplexed read pairs"
+    description: "Read pairs per sample after merging chunked demux outputs."
+    plot_type: "bar_graph"
+    pconfig:
+      id: "scifi_demux_sample_pairs"
+      title: "Read pairs per sample (Step 1 demux)"
+      xlab: "Sample"
+      ylab: "Read pairs"
+      decimalPlaces: 0
+    # relative to the library work_root where MultiQC runs
+    data: "qc/summary/sample_pairs.tsv"
+
+  - section_name: "Step 1 — fraction of library per sample"
+    description: "Fraction of original library read pairs assigned to each sample."
+    plot_type: "bar_graph"
+    pconfig:
+      id: "scifi_demux_sample_fraction"
+      title: "Fraction of library per sample"
+      xlab: "Sample"
+      ylab: "Fraction of original library"
+      min: 0
+      max: 1
+    data: "qc/summary/sample_pairs_fraction.tsv"
