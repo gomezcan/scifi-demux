@@ -18,6 +18,49 @@ def reverse_complement(seq: str) -> str:
     """Fast reverse complement of a DNA sequence."""
     return seq.translate(DNA_COMPLEMENT)[::-1]
 
+# --------------------------------------------------------------------
+# 10x correction: allow 1 mismatch (unique hit)
+# --------------------------------------------------------------------
+
+def correct_10x_one_mismatch(
+    seq_10x: str,
+    tenx_wl: Set[str],
+) -> Tuple[Optional[str], int]:
+    """
+    Correct a 10x barcode allowing at most one mismatch.
+
+    Returns:
+      (corrected_10x, status_code), where:
+        corrected_10x: the corrected 10x sequence or None if not resolvable
+        status_code:
+          0 = exact match
+          1 = corrected by 1 mismatch (unique candidate)
+          2 = fail (no candidate or ambiguous >1 candidate)
+    """
+    # Exact match first
+    if seq_10x in tenx_wl:
+        return seq_10x, 0
+
+    bases = ["A", "C", "G", "T", "N"]
+    candidates: list[str] = []
+
+    for i, orig in enumerate(seq_10x):
+        for b in bases:
+            if b == orig:
+                continue
+            mutant = seq_10x[:i] + b + seq_10x[i + 1 :]
+            if mutant in tenx_wl:
+                candidates.append(mutant)
+                # If we see >1 candidate, treat as ambiguous
+                if len(candidates) > 1:
+                    return None, 2
+
+    if not candidates:
+        return None, 2
+
+    # unique candidate
+    return candidates[0], 1
+
 
 # --------------------------------------------------------------------
 # Whitelist loading
@@ -102,7 +145,7 @@ def correct_barcodes(
         corrected_full_bc: 26 bp string or None if correction fails
         status:
           0 = exact, no correction needed
-          1 = corrected (Tn5A and/or Tn5B adjusted via tn5_map)
+          1 = corrected (10x and/or Tn5 adjusted)
           2 = fail (10x not in whitelist, or Tn5 unresolvable/ambiguous)
     """
     if len(raw_bc) < 26:
@@ -113,14 +156,15 @@ def correct_barcodes(
     raw_tn5_a = raw_bc[16:21]
     raw_tn5_b = raw_bc[21:26]
 
-    # Legacy logic: reverse complement the 10x portion
-    seq_10x = reverse_complement(raw_10x)
+    # Reverse complement the 10x portion (legacy behavior)
+    seq_10x_rc = reverse_complement(raw_10x)
 
-    # 1. Check 10x (exact match against 737k set)
-    if seq_10x not in tenx_wl:
+    # 1. Correct 10x (exact + 1-mismatch, unique)
+    corrected_10x, status_10x = correct_10x_one_mismatch(seq_10x_rc, tenx_wl)
+    if corrected_10x is None:
         return None, 2
 
-    # 2. Check/Correct Tn5 A
+    # 2. Check/Correct Tn5 A (exact + 1-mismatch via tn5_map)
     corr_tn5_a = tn5_map.get(raw_tn5_a)
     if not corr_tn5_a:
         return None, 2
@@ -130,8 +174,11 @@ def correct_barcodes(
     if not corr_tn5_b:
         return None, 2
 
-    final_bc = seq_10x + corr_tn5_a + corr_tn5_b
-    status = 1 if (corr_tn5_a != raw_tn5_a or corr_tn5_b != raw_tn5_b) else 0
+    final_bc = corrected_10x + corr_tn5_a + corr_tn5_b
+
+    corrected_any_tn5 = (corr_tn5_a != raw_tn5_a) or (corr_tn5_b != raw_tn5_b)
+    status = 0 if (status_10x == 0 and not corrected_any_tn5) else 1
+
     return final_bc, status
 
 
