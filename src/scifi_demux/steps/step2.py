@@ -13,13 +13,12 @@ Step 2 core:
 """
 
 from __future__ import annotations
-
 from pathlib import Path
 from typing import List, Optional
-
 import subprocess
 import shutil
 
+from scifi_demux.resources import get_scifi_script
 
 def _run(cmd: List[str] | str, *, dry_run: bool = False) -> None:
     """
@@ -160,6 +159,88 @@ def run_bwa_mapping(
 
     return bam_path
 
+
+
+def run_scifi_cleaning_pipeline(
+    base: str,
+    bam_raw: Path,
+    out_bam_dir: Path,
+    out_bed_dir: Path,
+    threads: int = 8,
+    mapq_min: int = 20,
+    dry_run: bool = False,
+) -> None:
+    """
+    Run the scifi-ATAC cleaning pipeline for a given base name and raw BAM.
+    Scripts are loaded from scifi_demux.legacy_scripts via get_scifi_script.
+    """
+    out_bam_dir.mkdir(parents=True, exist_ok=True)
+    out_bed_dir.mkdir(parents=True, exist_ok=True)
+
+    threads_str = str(threads)
+
+    # Resolve script paths from packaged resources
+    s_modify_bc   = get_scifi_script("1_1_scifi_modufy_BC_flag.pl")
+    s_count_bcs   = get_scifi_script("1_2_scifi_countBCs.BAM.pl")
+    s_correct_bcs = get_scifi_script("1_3_scifi_correctBCs.10x.v2.pl")
+    s_correct_bam = get_scifi_script("1_4_scifi_correctBAM.pl")
+    s_fix_bc      = get_scifi_script("1_5_scifi_fixBC.pl")
+    s_tn5_bed     = get_scifi_script("1_6_scifi_makeTn5bed.py")
+
+    # (pipeline body as before, just using these Paths)
+    # 1) sort
+    bam_sort = out_bam_dir / f"{base}.rawSort.bam"
+    _run([
+        "samtools",
+        "sort",
+        "-@",
+        threads_str,
+        "-o",
+        str(bam_sort),
+        str(bam_raw),
+    ], dry_run=dry_run)
+
+    # 2) BC tag + MAPQ ≥ mapq_min, proper pairs
+    bam_mq = out_bam_dir / f"{base}.mq{mapq_min}.bam"
+    _run(
+        f"perl {s_modify_bc} {bam_sort} "
+        f"| samtools view -@ {threads_str} -hb -q {mapq_min} -f 3 - "
+        f"> {bam_mq}",
+        dry_run=dry_run,
+    )
+
+    # 3) count barcodes (≥50)
+    bc_counts = out_bam_dir / f"{base}.mq{mapq_min}.barcodes.txt"
+    _run(
+        f"perl {s_count_bcs} {bam_mq} "
+        f"| awk '$2>49' "
+        f"> {bc_counts}",
+        dry_run=dry_run,
+    )
+
+    # 4) barcode correction
+    bc_corrected = out_bam_dir / f"{base}.mq{mapq_min}.barcodes.corrected.txt"
+    _run(
+        f"cat {bc_counts} "
+        f"| parallel --pipe -k -j {threads_str} -N 1000 "
+        f"perl {s_correct_bcs} "
+        f"> {bc_corrected}",
+        dry_run=dry_run,
+    )
+
+    # 5) update BAM with corrected BC tag
+    bam_bc = out_bam_dir / f"{base}.mq{mapq_min}.BC.bam"
+    _run(
+        f"perl {s_correct_bam} {bc_corrected} {bam_mq} "
+        f"| samtools view -@ {threads_str} -bhS -f 3 - "
+        f"> {bam_bc}",
+        dry_run=dry_run,
+    )
+
+    # 6) Picard MarkDuplicates ...
+    # 7) fix BC & multi-mapping ...
+    # 8) make Tn5 BED + pigz ...
+    # (keep the rest of the function identical to the previous 
 
 def run_scifi_cleaning_pipeline(
     base: str,
