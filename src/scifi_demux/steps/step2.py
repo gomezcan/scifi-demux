@@ -4,12 +4,11 @@ Step 2 core:
   - Ensure BWA index (build if ref_path is a FASTA).
   - Map paired FASTQs with bwa mem.
   - Run scifi-ATAC cleaning pipeline:
-      * BC tagging + MAPQ filter
-      * barcode counting / correction
-      * BC-corrected BAM
+      * Python BC tagging + MAPQ filter + 10x/Tn5 correction
+        (replaces legacy 1_1–1_4 scripts)
       * Picard MarkDuplicates (BARCODE_TAG=BC)
-      * multi-mapping + BC fix
-      * Tn5 BED generation
+      * multi-mapping + BC fix (legacy 1_5_scifi_fixBC.pl)
+      * Tn5 BED generation (legacy 1_6_scifi_makeTn5bed.py)
 """
 
 from __future__ import annotations
@@ -19,6 +18,7 @@ from typing import List
 import subprocess
 
 from scifi_demux.resources import get_scifi_script
+from scifi_demux.utils.scifi_cleanup import scifi_cleanup_bam
 
 
 # ---------------------------------------------------------------------------
@@ -87,8 +87,8 @@ def ensure_bwa_index(ref_path: Path, threads: int = 4, dry_run: bool = False) ->
     fasta_suffixes = {".fa", ".fasta", ".fna", ".fa.gz", ".fasta.gz", ".fna.gz"}
     is_fasta = any(str(ref_path).endswith(suf) for suf in fasta_suffixes)
     if not is_fasta:
-        # Assume user passed an index prefix that just doesn't have files locally yet
-        # (e.g., mis-specified path) — fail with a clear message.
+        # User passed something that doesn't look like a FASTA and index files
+        # are missing: fail clearly.
         raise FileNotFoundError(
             f"[step2] BWA index files not found for prefix={prefix}. "
             f"ref_path={ref_path} does not look like FASTA, so index cannot be built automatically."
@@ -174,7 +174,7 @@ def run_bwa_mapping(
 
 
 # ---------------------------------------------------------------------------
-# Cleaning pipeline (Perl/Picard/Tn5)
+# Cleaning pipeline
 # ---------------------------------------------------------------------------
 
 def run_scifi_cleaning_pipeline(
@@ -182,6 +182,8 @@ def run_scifi_cleaning_pipeline(
     bam_raw: Path,
     out_bam_dir: Path,
     out_bed_dir: Path,
+    whitelist_10x: Path,
+    whitelist_tn5: Path,
     threads: int = 8,
     mapq_min: int = 20,
     dry_run: bool = False,
@@ -189,28 +191,28 @@ def run_scifi_cleaning_pipeline(
     """
     Run the scifi-ATAC cleaning pipeline for a given base name and raw BAM.
 
-    This reproduces your original doCall() steps, with mapq_min tunable.
-    Scripts are loaded from scifi_demux.legacy_scripts via get_scifi_script.
+    Python stage:
+      - Sort BAM
+      - Filter: mapped, MAPQ ≥ mapq_min, proper pairs
+      - 10x whitelist check + Tn5 1-mismatch correction
+      - Attach BC tag, write <base>.mq{mapq_min}.BC.bam
 
-    Paths:
-
-      OUT_DIC    ~= out_bam_dir
-      OUT_DICBED ~= out_bed_dir
+    Legacy stages:
+      - Picard MarkDuplicates (BARCODE_TAG=BC)
+      - 1_5_scifi_fixBC.pl  (multi-mapping + BC fix; writes *_rmdup.mm.bam + *_bc_counts.txt)
+      - 1_6_scifi_makeTn5bed.py → BED → sort/uniq → pigz
+      - per-BAM read counts and optional cleanup
     """
     out_bam_dir.mkdir(parents=True, exist_ok=True)
     out_bed_dir.mkdir(parents=True, exist_ok=True)
 
     threads_str = str(threads)
 
-    # Resolve script paths from packaged resources
-    s_modify_bc   = get_scifi_script("1_1_scifi_modufy_BC_flag.pl")
-    s_count_bcs   = get_scifi_script("1_2_scifi_countBCs.BAM.pl")
-    s_correct_bcs = get_scifi_script("1_3_scifi_correctBCs.10x.v2.pl")
-    s_correct_bam = get_scifi_script("1_4_scifi_correctBAM.pl")
-    s_fix_bc      = get_scifi_script("1_5_scifi_fixBC.pl")
-    s_tn5_bed     = get_scifi_script("1_6_scifi_makeTn5bed.py")
+    # Resolve legacy scripts from package data
+    s_fix_bc = get_scifi_script("1_5_scifi_fixBC.pl")
+    s_tn5_bed = get_scifi_script("1_6_scifi_makeTn5bed.py")
 
-    # 1) sort
+    # 1) Sort raw BAM from BWA
     bam_sort = out_bam_dir / f"{base}.rawSort.bam"
     cmd_sort = [
         "samtools",
@@ -223,46 +225,26 @@ def run_scifi_cleaning_pipeline(
     ]
     _run(cmd_sort, dry_run=dry_run)
 
-    # 2) BC tag + MAPQ ≥ mapq_min, keep proper pairs (-f 3)
-    bam_mq = out_bam_dir / f"{base}.mq{mapq_min}.bam"
-    cmd_bc_mq = (
-        f"perl {s_modify_bc} {bam_sort} "
-        f"| samtools view -@ {threads_str} -hb -q {mapq_min} -f 3 - "
-        f"> {bam_mq}"
-    )
-    _run(cmd_bc_mq, dry_run=dry_run)
-
-    # 3) count barcodes, require ≥ 50 reads
-    bc_counts = out_bam_dir / f"{base}.mq{mapq_min}.barcodes.txt"
-    cmd_count = (
-        f"perl {s_count_bcs} {bam_mq} "
-        f"| awk '$2>49' "
-        f"> {bc_counts}"
-    )
-    _run(cmd_count, dry_run=dry_run)
-
-    # 4) barcode correction (parallel over barcodes)
-    bc_corrected = out_bam_dir / f"{base}.mq{mapq_min}.barcodes.corrected.txt"
-    cmd_correct_bcs = (
-        f"cat {bc_counts} "
-        f"| parallel --pipe -k -j {threads_str} -N 1000 "
-        f"perl {s_correct_bcs} "
-        f"> {bc_corrected}"
-    )
-    _run(cmd_correct_bcs, dry_run=dry_run)
-
-    # 5) update BAM with corrected BC tag
+    # 2) Python barcode cleanup + MAPQ filter → BC-tagged BAM
     bam_bc = out_bam_dir / f"{base}.mq{mapq_min}.BC.bam"
-    cmd_correct_bam = (
-        f"perl {s_correct_bam} "
-        f"{bc_corrected} "
-        f"{bam_mq} "
-        f"| samtools view -@ {threads_str} -bhS -f 3 - "
-        f"> {bam_bc}"
-    )
-    _run(cmd_correct_bam, dry_run=dry_run)
+    if dry_run:
+        print(
+            f"[step2] DRY-RUN: would run scifi_cleanup_bam("
+            f"input_bam={bam_sort}, output_bam={bam_bc}, "
+            f"whitelist_10x={whitelist_10x}, whitelist_tn5={whitelist_tn5}, "
+            f"min_mapq={mapq_min}, threads={threads})"
+        )
+    else:
+        scifi_cleanup_bam(
+            input_bam=bam_sort,
+            output_bam=bam_bc,
+            whitelist_10x=whitelist_10x,
+            whitelist_tn5=whitelist_tn5,
+            min_mapq=mapq_min,
+            threads=threads,
+        )
 
-    # 6) remove duplicates with Picard MarkDuplicates
+    # 3) Remove duplicates with Picard MarkDuplicates
     bam_rmdup = out_bam_dir / f"{base}.mq{mapq_min}.BC.rmdup.bam"
     metrics = out_bam_dir / f"{base}.metrics"
     cmd_picard = [
@@ -278,7 +260,7 @@ def run_scifi_cleaning_pipeline(
     ]
     _run(cmd_picard, dry_run=dry_run)
 
-    # 7) fix multi-mapping & BC
+    # 4) Fix multi-mapping & BC (legacy Perl)
     bam_mm = out_bam_dir / f"{base}.mq{mapq_min}.BC.rmdup.mm.bam"
     bc_counts_out = out_bam_dir / f"{base}_bc_counts.txt"
     cmd_fix_bc = [
@@ -292,7 +274,7 @@ def run_scifi_cleaning_pipeline(
     ]
     _run(cmd_fix_bc, dry_run=dry_run)
 
-    # 8) make Tn5 BED
+    # 5) Index final BAM
     cmd_index = [
         "samtools",
         "index",
@@ -302,6 +284,7 @@ def run_scifi_cleaning_pipeline(
     ]
     _run(cmd_index, dry_run=dry_run)
 
+    # 6) Make Tn5 BED and compress
     bed_path = out_bed_dir / f"{base}.mq{mapq_min}.tn5.bed"
     cmd_tn5 = (
         f"python {s_tn5_bed} {bam_mm} "
@@ -311,7 +294,6 @@ def run_scifi_cleaning_pipeline(
     )
     _run(cmd_tn5, dry_run=dry_run)
 
-    # compress BED
     cmd_gzip = [
         "pigz",
         "-p",
@@ -320,7 +302,7 @@ def run_scifi_cleaning_pipeline(
     ]
     _run(cmd_gzip, dry_run=dry_run)
 
-    # optional counts
+    # 7) Optional read counts
     proper_pairs_txt = out_bam_dir / f"{base}.mq{mapq_min}.BC.rmdup.proper_pairs.txt"
     proper_pairs_mm_txt = out_bam_dir / f"{base}.mq{mapq_min}.BC.rmdup.mm.proper_pairs.txt"
 
@@ -340,14 +322,12 @@ def run_scifi_cleaning_pipeline(
         "-c",
         str(bam_mm),
     ]
-    # write counts via shell redirection
     _run(" ".join(str(x) for x in cmd_count_pp) + f" > {proper_pairs_txt}", dry_run=dry_run)
     _run(" ".join(str(x) for x in cmd_count_pp_mm) + f" > {proper_pairs_mm_txt}", dry_run=dry_run)
 
-    # optional cleanup of intermediates
-    for p in (bam_mq, bam_bc, bam_sort):
-        if not dry_run and p.exists():
-            p.unlink()
+    # 8) Optional cleanup of intermediates
+    if not dry_run and bam_sort.exists():
+        bam_sort.unlink()
 
 
 # ---------------------------------------------------------------------------
@@ -361,6 +341,8 @@ def run_step2_for_sample_genome(
     fq_r3: Path,
     ref_path: Path,
     out_root: Path,
+    whitelist_10x: Path,
+    whitelist_tn5: Path,
     threads: int = 8,
     mapq_min: int = 20,
     dry_run: bool = False,
@@ -372,15 +354,20 @@ def run_step2_for_sample_genome(
     - Map fq_r1/fq_r3 with bwa mem.
     - Run scifi-ATAC cleanup pipeline.
 
-    The final BAM is:
-      <out_root>/<sample_id>/<sample_id>_<genome_target>_scifiATAC.mq<mapq_min>.BC.rmdup.mm.bam
+    Final outputs:
 
-    And the final Tn5 BED is:
-      <out_root>/<sample_id>/bed/<sample_id>_<genome_target>_scifiATAC.mq<mapq_min>.tn5.bed.gz
+      BAM:
+        <out_root>/<sample_id>/
+          <sample_id>_<genome_target>_scifiATAC.mq<mapq_min>.BC.rmdup.mm.bam
+          + .bai index and *_bc_counts.txt
+
+      BED:
+        <out_root>/<sample_id>/bed/
+          <sample_id>_<genome_target>_scifiATAC.mq<mapq_min>.tn5.bed.gz
     """
     out_root = out_root.resolve()
     sample_out_dir = out_root / sample_id
-    bam_dir = sample_out_dir              # like your original BWA_OUTPUT_DIR
+    bam_dir = sample_out_dir
     bed_dir = sample_out_dir / "bed"
 
     # 1) ensure index
@@ -405,6 +392,8 @@ def run_step2_for_sample_genome(
         bam_raw=bam_raw,
         out_bam_dir=bam_dir,
         out_bed_dir=bed_dir,
+        whitelist_10x=whitelist_10x,
+        whitelist_tn5=whitelist_tn5,
         threads=threads,
         mapq_min=mapq_min,
         dry_run=dry_run,
