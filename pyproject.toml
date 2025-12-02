@@ -1,6 +1,6 @@
 [build-system]
-requires = ["hatchling>=1.25"]
-build-backend = "hatchling.build"
+requires = ["hatchling>=1.25", "wheel"]
+build-backend = ["hatchling.build", "setuptools.build_meta"]
 
 [project]
 name = "scifi-demux"
@@ -21,12 +21,18 @@ dependencies = [
 [project.scripts]
 scifi-demux = "scifi_demux.cli:app"
 
+[tool.setuptools.packages.find]
+where = ["src"]
+
 # wheel target (src layout)
 [tool.hatch.build.targets.wheel]
 packages = ["src/scifi_demux"]
 include = [
   "src/scifi_demux/__data__/**",  # ship all data files in the wheel
 ]
+
+[tool.setuptools.package-data]
+"scifi_demux.legacy_scripts" = ["1_*.pl", "1_6_scifi_makeTn5bed.py"]
 
 # sdist target (source distribution)
 [tool.hatch.build.targets.sdist]
