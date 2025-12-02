@@ -16,7 +16,7 @@ from pathlib import Path
 from typing import List
 import subprocess
 
-from scifi_demux.resources import get_scifi_script
+
 from scifi_demux.utils.scifi_cleanup import scifi_cleanup_bam
 from scifi_demux.utils.scifi_fixBC import process_and_count
 
