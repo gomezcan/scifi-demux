@@ -19,6 +19,7 @@ import subprocess
 
 from scifi_demux.resources import get_scifi_script
 from scifi_demux.utils.scifi_cleanup import scifi_cleanup_bam
+from scifi_demux.utils.scifi_fixBC import process_and_count
 
 
 # ---------------------------------------------------------------------------
@@ -259,20 +260,29 @@ def run_scifi_cleaning_pipeline(
         "MAX_FILE_HANDLES_FOR_READ_ENDS_MAP=1000",
     ]
     _run(cmd_picard, dry_run=dry_run)
-
-    # 4) Fix multi-mapping & BC (legacy Perl)
+    
+    # -----------------------------------------------------------
+    # 4) fix multi-mapping & BC (Replaces 1_5_scifi_fixBC.pl)
+    # -----------------------------------------------------------  
     bam_mm = out_bam_dir / f"{base}.mq{mapq_min}.BC.rmdup.mm.bam"
     bc_counts_out = out_bam_dir / f"{base}_bc_counts.txt"
-    cmd_fix_bc = [
-        "perl",
-        str(s_fix_bc),
-        threads_str,
-        str(bam_rmdup),
-        str(bam_mm),
-        str(bc_counts_out),
-        base,
-    ]
-    _run(cmd_fix_bc, dry_run=dry_run)
+    if dry_run:
+        print(
+            f"[step2] DRY-RUN: would run scifi_fixBC.process_and_count("
+            f"input_bam={bam_rmdup}, output_bam={bam_mm}, "
+            f"counts_file={bc_counts_out}, library_tag={base}, "
+            f"threads={threads})"
+        )
+    else:
+        process_and_count(
+            input_bam=str(bam_rmdup),
+            output_bam=str(bam_mm),
+            counts_file=str(bc_counts_out),
+            library_tag=base,   # same as Perl script's last arg
+            threads=threads,
+            tissue_label="leaf",  # or make this configurable later
+        )
+
 
     # 5) Index final BAM
     cmd_index = [
