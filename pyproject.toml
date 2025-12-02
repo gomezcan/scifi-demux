@@ -1,40 +1,57 @@
 [build-system]
-requires = ["hatchling>=1.25", "wheel"]
-build-backend = ["hatchling.build", "setuptools.build_meta"]
+requires = ["hatchling>=1.25"]
+build-backend = "hatchling.build"
 
 [project]
 name = "scifi-demux"
-version = "0.1.1"  # <-- bump so pip doesn't reuse a cached wheel
-description = "Wraps renaming and demultiplexing scripts for scifi-ATAC FASTQ workflows"
+version = "0.1.2"
+description = "scifi-ATAC FASTQ demultiplexing, mapping, and cleanup pipeline"
 readme = "README.md"
 authors = [{ name = "Fabio Gomez", email = "gomezcan@umich.edu" }]
 license = { file = "LICENSE" }
 requires-python = ">=3.9"
+
 dependencies = [
   "typer>=0.12",
   "pydantic>=2.7",
   "pyyaml>=6",
   "rich>=13",
-  "tqdm>=4",
+  "tqdm>=4"
 ]
 
 [project.scripts]
 scifi-demux = "scifi_demux.cli:app"
 
-[tool.setuptools.packages.find]
-where = ["src"]
+# -------------------------------------------------------------------------
+# HATCH BUILD CONFIG — src/ layout + package data
+# -------------------------------------------------------------------------
 
-# wheel target (src layout)
-[tool.hatch.build.targets.wheel]
+[tool.hatch.build]
+# ensure src layout is honored
 packages = ["src/scifi_demux"]
+
+# include script resources & data directories in wheel
 include = [
-  "src/scifi_demux/__data__/**",  # ship all data files in the wheel
+  "src/scifi_demux/**",
 ]
 
-[tool.setuptools.package-data]
-"scifi_demux.legacy_scripts" = ["1_*.pl", "1_6_scifi_makeTn5bed.py"]
+# -------------------------------------------------------------------------
+# This ensures the Perl scripts and tn5 python script ship inside wheel
+# They must live in: src/scifi_demux/legacy_scripts/
+# -------------------------------------------------------------------------
+[tool.hatch.build.targets.wheel]
+force-include = {
+  "src/scifi_demux/legacy_scripts/1_1_scifi_modufy_BC_flag.pl" = "scifi_demux/legacy_scripts/1_1_scifi_modufy_BC_flag.pl",
+  "src/scifi_demux/legacy_scripts/1_2_scifi_countBCs.BAM.pl" = "scifi_demux/legacy_scripts/1_2_scifi_countBCs.BAM.pl",
+  "src/scifi_demux/legacy_scripts/1_3_scifi_correctBCs.10x.v2.pl" = "scifi_demux/legacy_scripts/1_3_scifi_correctBCs.10x.v2.pl",
+  "src/scifi_demux/legacy_scripts/1_4_scifi_correctBAM.pl" = "scifi_demux/legacy_scripts/1_4_scifi_correctBAM.pl",
+  "src/scifi_demux/legacy_scripts/1_5_scifi_fixBC.pl" = "scifi_demux/legacy_scripts/1_5_scifi_fixBC.pl",
+  "src/scifi_demux/legacy_scripts/1_6_scifi_makeTn5bed.py" = "scifi_demux/legacy_scripts/1_6_scifi_makeTn5bed.py",
+}
 
-# sdist target (source distribution)
+# -------------------------------------------------------------------------
+# SDIST
+# -------------------------------------------------------------------------
 [tool.hatch.build.targets.sdist]
 include = [
   "src/scifi_demux/**",
