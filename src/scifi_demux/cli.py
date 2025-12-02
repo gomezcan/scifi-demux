@@ -124,9 +124,10 @@ def _discover_step2_fastqs_from_step1(work_root: Path, sample: str) -> List[Path
 
     Priority:
       1) <work_root>/<sample>.fastq(.gz)
-      2) <work_root>/sample/combined/*.fastq*
+      2) <work_root>/combined/*.fastq*      (current scifi-demux v2 layout)
+      3) <work_root>/sample/combined/*.fastq*  (fallback for older layouts)
     """
-    # Direct files in work_root
+    # Direct files in work_root (rare, but keep the option)
     direct = work_root / f"{sample}.fastq"
     direct_gz = work_root / f"{sample}.fastq.gz"
 
@@ -135,19 +136,31 @@ def _discover_step2_fastqs_from_step1(work_root: Path, sample: str) -> List[Path
     if direct_gz.exists():
         return [direct_gz]
 
-    # Fallback: combined dir
-    combined_dir = work_root / "sample" / "combined"
-    if not combined_dir.exists():
-        raise FileNotFoundError(
-            f"Could not find FASTQs for sample={sample}. "
-            f"Tried {direct}, {direct_gz}, and combined dir {combined_dir}"
-        )
+    # v2: combined directly under work_root
+    tried_dirs = []
+    combined_v2 = work_root / "combined"
+    if combined_v2.exists():
+        fastqs = sorted(combined_v2.glob("*.fastq*"))
+        if fastqs:
+            return fastqs
+        tried_dirs.append(str(combined_v2))
 
-    fastqs = sorted(combined_dir.glob("*.fastq*"))
-    if not fastqs:
-        raise FileNotFoundError(f"No FASTQs found in combined dir: {combined_dir}")
+    # fallback: older layout with sample/combined
+    combined_legacy = work_root / "sample" / "combined"
+    if combined_legacy.exists():
+        fastqs = sorted(combined_legacy.glob("*.fastq*"))
+        if fastqs:
+            return fastqs
+        tried_dirs.append(str(combined_legacy))
 
-    return fastqs
+    if not tried_dirs:
+        tried_dirs = [str(combined_v2), str(combined_legacy)]
+
+    raise FileNotFoundError(
+        f"Could not find FASTQs for sample={sample}. "
+        f"Tried {direct}, {direct_gz}, and combined dirs: {', '.join(tried_dirs)}"
+    )
+
 
 
 # ------------------------------------------------------------------------------------
