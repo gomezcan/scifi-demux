@@ -107,6 +107,7 @@ def demux_sample_design(
 # helpers
 # ------------------------------------------------------------------------------------
 
+
 def _read_array_id_from_env() -> int | None:
     for var in ("SLURM_ARRAY_TASK_ID", "PBS_ARRAYID", "SGE_TASK_ID", "LSB_JOBINDEX", "ARRAY_ID"):
         v = os.environ.get(var)
@@ -124,8 +125,8 @@ def _discover_step2_fastqs_from_step1(work_root: Path, sample: str) -> List[Path
 
     Priority:
       1) <work_root>/<sample>.fastq(.gz)
-      2) <work_root>/combined/*.fastq*      (current scifi-demux v2 layout)
-      3) <work_root>/sample/combined/*.fastq*  (fallback for older layouts)
+      2) <work_root>/combined/*.fastq*          (current scifi-demux v2 layout)
+      3) <work_root>/sample/combined/*.fastq*   (fallback for older layouts)
     """
     # Direct files in work_root (rare, but keep the option)
     direct = work_root / f"{sample}.fastq"
@@ -136,8 +137,9 @@ def _discover_step2_fastqs_from_step1(work_root: Path, sample: str) -> List[Path
     if direct_gz.exists():
         return [direct_gz]
 
+    tried_dirs: List[str] = []
+
     # v2: combined directly under work_root
-    tried_dirs = []
     combined_v2 = work_root / "combined"
     if combined_v2.exists():
         fastqs = sorted(combined_v2.glob("*.fastq*"))
@@ -160,7 +162,6 @@ def _discover_step2_fastqs_from_step1(work_root: Path, sample: str) -> List[Path
         f"Could not find FASTQs for sample={sample}. "
         f"Tried {direct}, {direct_gz}, and combined dirs: {', '.join(tried_dirs)}"
     )
-
 
 
 # ------------------------------------------------------------------------------------
@@ -282,9 +283,6 @@ def step1_run(
     # LOCAL mode: use run_step1_local (GNU parallel fan-out)
     if mode == "local":
         total_chunks = chunks if chunks is not None else max(1, threads)
-        # run_step1_local currently always uses <library>_work internally;
-        # plan is written into work_root we pass here.
-        # We ignore work_root override for local for now to keep step1.py simple.
         run_step1_local(
             library=library,
             raw_dir=raw_dir,
@@ -417,6 +415,7 @@ def step1_report(
 step2_app = typer.Typer(help="Step 2: genome index resolve → map → clean (8 sub-steps)")
 app.add_typer(step2_app, name="step2")
 
+
 @step2_app.command("plan")
 def step2_plan(
     genome_map: Path = typer.Option(
@@ -467,7 +466,6 @@ def step2_plan(
     console.print(f"[bold]Planned[/]: {len(lines)} mapping rows → {plan_path}")
 
 
-
 @step2_app.command("run")
 def step2_run(
     mode: str = typer.Option("local", help="local|hpc"),
@@ -475,10 +473,7 @@ def step2_run(
     outdir: Path = typer.Option(..., help="Output directory"),
     state: Path = typer.Option(STATE_PATH_DEFAULT),
     dry_run: bool = typer.Option(True),
-    sample: str = typer.Option(
-        ...,
-        help="Sample/library name for discovering step1 FASTQs",
-    ),
+    sample: str = typer.Option(..., help="Sample/library name for FASTQ discovery"),
     from_step1_work_root: Optional[Path] = typer.Option(
         None,
         "--from-step1-work-root",
@@ -490,16 +485,21 @@ def step2_run(
             "If provided, FASTQs will be auto-discovered for `sample`."
         ),
     ),
+    mapq_min: int = typer.Option(20, help="Minimum MAPQ to keep (default: 20)"),
 ):
     """
-    Step 2 core logic.
+    Step 2 orchestrator (currently stub):
 
-    Currently this is a scheduler/inspection stub:
       - Lists pending step2 mapping tasks from the state file.
       - Optionally discovers input FASTQs produced by step1 for a given sample
-        when --from-step1-work-root is supplied, using the rule:
+        when --from-step1-work-root is supplied, using:
           1) <work_root>/<sample>.fastq(.gz)
-          2) <work_root>/sample/combined/*.fastq*
+          2) <work_root>/combined/*.fastq*          (v2 layout)
+          3) <work_root>/sample/combined/*.fastq*   (legacy layout)
+
+    The actual mapping/cleaning execution will be wired to steps/step2.py
+    in a later iteration. The `mapq_min` option is accepted now so the CLI
+    is stable once the core implementation is added.
     """
     # Discover FASTQs from step1 workspace if requested
     if from_step1_work_root is not None:
@@ -522,7 +522,8 @@ def step2_run(
         and t.get("steps", {}).get("map", {}).get("status") != "done"
     ]
     console.print(
-        f"[bold]Step 2[/] mode={mode} threads={threads_per_task} dry_run={dry_run}"
+        f"[bold]Step 2[/] mode={mode} threads={threads_per_task} "
+        f"dry_run={dry_run} outdir={outdir} mapq_min={mapq_min}"
     )
     console.print(f"Pending mapping tasks: {len(pending)}")
     if dry_run:
@@ -534,9 +535,10 @@ def step2_run(
             )
         if len(pending) > 10:
             console.print(f" - ... and {len(pending) - 10} more tasks")
-        console.print("[yellow]Use --dry-run False to execute these tasks[/]")
+        console.print("[yellow]Use --dry-run False to execute these tasks (once wired).[/]")
     else:
         console.print(
-            "Execution wiring will call into steps/step2.py "
-            "(to be filled with mapping/cleaning implementation)."
+            "[red]Execution not yet implemented[/]: "
+            "mapping/cleaning will be wired to steps/step2.py "
+            "run_step2_for_sample_genome() in a later revision."
         )
