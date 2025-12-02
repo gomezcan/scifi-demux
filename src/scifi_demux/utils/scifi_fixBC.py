@@ -1,8 +1,12 @@
+# src/scifi_demux/utils/scifi_fixBC.py
+
 import argparse
 import sys
+from collections import defaultdict, Counter
+from typing import Dict
+
 import pysam
-from collections import defaultdict
-from typing import Dict, Counter
+
 
 def process_and_count(
     input_bam: str,
@@ -10,14 +14,25 @@ def process_and_count(
     counts_file: str,
     library_tag: str,
     threads: int = 4,
-    tissue_label: str = "leaf"
-):
-    # Counters
-    # Structure: { barcode: { 'total': 0, 'pt': 0, 'mt': 0 } }
+    tissue_label: str = "leaf",
+) -> None:
+    """
+    Post-MarkDuplicates cleanup:
+
+      - XA-based multi-mapping filter:
+          if MAPQ < 30 and XA present, check alt NM vs current NM;
+          if more than 1 'near' hit (alt_nm - current_nm < 3), drop the read.
+      - Drop reads where CBK == 'F'.
+      - Append '-{library_tag}' suffix to BC tag.
+      - Count per-BC total, Pt, Mt, and write stats to counts_file.
+
+    This is designed to mirror the behavior of 1_5_scifi_fixBC.pl.
+    """
+
+    # Structure: { barcode: Counter({'total': ..., 'pt': ..., 'mt': ...}) }
     stats: Dict[str, Counter] = defaultdict(Counter)
 
     # Open BAMs
-    # "rb" = read BAM, "wb" = write BAM
     infile = pysam.AlignmentFile(input_bam, "rb", threads=threads)
     outfile = pysam.AlignmentFile(output_bam, "wb", template=infile, threads=threads)
 
@@ -28,78 +43,58 @@ def process_and_count(
 
     for read in infile:
         count_total_read += 1
-        
+
         # ---------------------------------------------------------
-        # 1. Filter: Multi-mapping check (XA tag logic)
+        # 1. Multi-mapping filter (XA + NM based)
         # ---------------------------------------------------------
-        # Perl logic: if (XA exists AND mapq < 30):
-        #   check diff between XA NM and current NM. 
-        #   if diff < 3: near++
-        #   if near > 1: skip read
         if read.mapping_quality < 30 and read.has_tag("XA"):
             try:
-                # NM:i: tag (Edit distance)
                 current_nm = read.get_tag("NM")
-                
-                # XA:Z: tag (Alternative hits)
-                # Format: chr,pos,CIGAR,NM;next_hit;...
                 xa_str = read.get_tag("XA")
-                
+
                 near_hits = 0
-                
-                # Split by ';' to get alignments, filter empty strings
-                alignments = [x for x in xa_str.split(';') if x]
-                
+                alignments = [x for x in xa_str.split(";") if x]
+
                 for aln in alignments:
-                    parts = aln.split(',')
-                    # The NM value is the last element in the XA comma-list
+                    parts = aln.split(",")
                     if len(parts) > 0:
                         alt_nm = int(parts[-1])
                         diff = alt_nm - current_nm
-                        
-                        # "Too close" check
                         if diff < 3:
                             near_hits += 1
-                
-                # Strict Perl translation: if ($near > 1) { next; }
+
+                # strict: if near_hits > 1, drop read
                 if near_hits > 1:
                     continue
 
             except (KeyError, ValueError, IndexError):
-                # If tags are missing or malformed, rely on default behavior (keep read)
+                # if malformed tags, keep the read but don't crash
                 pass
 
         # ---------------------------------------------------------
-        # 2. Filter: CBK tag check
+        # 2. CBK tag filter
         # ---------------------------------------------------------
         if read.has_tag("CBK"):
             if read.get_tag("CBK") == "F":
                 continue
 
         # ---------------------------------------------------------
-        # 3. Barcode Update & Counting
+        # 3. Barcode update & counting
         # ---------------------------------------------------------
         if read.has_tag("BC"):
             old_bc = read.get_tag("BC")
-            
-            # Append library tag
             new_bc = f"{old_bc}-{library_tag}"
-            
-            # Update the read
+
             read.set_tag("BC", new_bc, value_type="Z")
-            
-            # Count logic
-            stats[new_bc]['total'] += 1
-            
-            # Check reference name for Plastid/Mitochondria
-            # Perl used regex: =~ /Pt/ and =~ /Mt/
-            rname = read.reference_name
+
+            stats[new_bc]["total"] += 1
+
+            rname = read.reference_name or ""
             if "Pt" in rname:
-                stats[new_bc]['pt'] += 1
+                stats[new_bc]["pt"] += 1
             elif "Mt" in rname:
-                stats[new_bc]['mt'] += 1
-            
-            # Write to output
+                stats[new_bc]["mt"] += 1
+
             outfile.write(read)
             count_written += 1
 
@@ -107,31 +102,38 @@ def process_and_count(
     outfile.close()
 
     # ---------------------------------------------------------
-    # 4. Write Counts File
+    # 4. Write counts file
     # ---------------------------------------------------------
     print(f"[INFO] Writing counts to {counts_file}...", file=sys.stderr)
-    
-    with open(counts_file, 'w') as f:
-        # Header matches Perl script
+
+    with open(counts_file, "w") as f:
         f.write("cellID\ttotal\tnuclear\tPt\tMt\tlibrary\ttissue\n")
-        
-        # Sort by total count descending (perl: sort { $bcs{$b} <=> $bcs{$a} })
-        sorted_bcs = sorted(stats.keys(), key=lambda k: stats[k]['total'], reverse=True)
-        
+
+        # sort by total descending
+        sorted_bcs = sorted(stats.keys(), key=lambda k: stats[k]["total"], reverse=True)
+
         for bc in sorted_bcs:
-            total = stats[bc]['total']
-            pt = stats[bc]['pt']
-            mt = stats[bc]['mt']
+            total = stats[bc]["total"]
+            pt = stats[bc]["pt"]
+            mt = stats[bc]["mt"]
             nuclear = total - pt - mt
-            
-            f.write(f"{bc}\t{total}\t{nuclear}\t{pt}\t{mt}\t{library_tag}\t{tissue_label}\n")
 
-    print(f"[INFO] Finished. Processed {count_total_read} reads, wrote {count_written}.", file=sys.stderr)
+            f.write(
+                f"{bc}\t{total}\t{nuclear}\t{pt}\t{mt}\t{library_tag}\t{tissue_label}\n"
+            )
 
-def main():
-    parser = argparse.ArgumentParser(description="Post-MarkDuplicates cleanup (XA filter + BC Tagging)")
-    
-    # Matching the Perl script arguments structure for ease of replacement
+    print(
+        f"[INFO] Finished. Processed {count_total_read} reads, wrote {count_written}.",
+        file=sys.stderr,
+    )
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(
+        description="Post-MarkDuplicates cleanup (XA filter + BC Tagging)"
+    )
+
+    # roughly parallel to the Perl script’s arguments
     parser.add_argument("--threads", type=int, default=4)
     parser.add_argument("--input-bam", required=True)
     parser.add_argument("--output-bam", required=True)
@@ -147,8 +149,9 @@ def main():
         counts_file=args.counts_file,
         library_tag=args.tag,
         threads=args.threads,
-        tissue_label=args.tissue
+        tissue_label=args.tissue,
     )
+
 
 if __name__ == "__main__":
     main()
