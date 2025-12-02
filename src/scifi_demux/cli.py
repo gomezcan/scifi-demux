@@ -404,13 +404,12 @@ def step1_report(
 step2_app = typer.Typer(help="Step 2: genome index resolve → map → clean (8 sub-steps)")
 app.add_typer(step2_app, name="step2")
 
-
 @step2_app.command("plan")
 def step2_plan(
     genome_map: Path = typer.Option(
         ...,
         exists=True,
-        help="TSV: sample_base, target_genome, ref_path",
+        help="TSV: sample_base, target_genome, ref_path[, sample_path]",
     ),
     state: Path = typer.Option(STATE_PATH_DEFAULT),
 ):
@@ -423,8 +422,10 @@ def step2_plan(
                 continue
             cols = ln.split("\t") if "\t" in ln else ln.split()
             if len(cols) < 3:
-                raise typer.BadParameter(f"Bad line (expect 3 cols): {ln}")
+                raise typer.BadParameter(f"Bad line (expect ≥3 cols): {ln}")
             group, genome, ref_path = cols[0], cols[1], cols[2]
+            sample_path = cols[3] if len(cols) > 3 else None
+
             task_id = f"step2:group:{group}:genome:{genome}"
             task = add_or_get_task(
                 s,
@@ -436,12 +437,22 @@ def step2_plan(
             step_keys = ["index", "map"] + [f"clean_{i}" for i in range(1, 9)]
             for k in step_keys:
                 task.setdefault("steps", {}).setdefault(k, {"status": "pending"})
-            task.setdefault("params", {})["ref_path"] = ref_path
-            lines.append(f"{group}\t{genome}\t{ref_path}")
+
+            params = task.setdefault("params", {})
+            params["ref_path"] = ref_path
+            if sample_path is not None:
+                params["sample_path"] = sample_path
+
+            # keep all columns in the plan file
+            if sample_path is not None:
+                lines.append(f"{group}\t{genome}\t{ref_path}\t{sample_path}")
+            else:
+                lines.append(f"{group}\t{genome}\t{ref_path}")
     save_state(s, state)
     plan_path = genome_map.parent / "run_plan.map.tsv"
     plan_path.write_text("\n".join(lines) + "\n")
     console.print(f"[bold]Planned[/]: {len(lines)} mapping rows → {plan_path}")
+
 
 
 @step2_app.command("run")
