@@ -18,7 +18,7 @@ except ImportError:
 # legacy simple commands
 from scifi_demux.io_utils import find_fastqs, ensure_dir
 from scifi_demux.renaming import plan_renames, apply_renames
-from scifi_demux.demux import run_demux
+
 
 # state + step1/step2
 from scifi_demux.utils.state import (
