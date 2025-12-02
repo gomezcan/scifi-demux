@@ -1,12 +1,52 @@
+# src/scifi_demux/cli/main.py
 from __future__ import annotations
+
 import os
 from pathlib import Path
 from typing import Optional, List
+
 import typer
 from rich.table import Table
 from rich.console import Console
 
-from scifi_demux.utils.logging import setup_logging
+# logging
+try:
+    from scifi_demux.utils.logging import setup_logging  # new location
+except ImportError:
+    from scifi_demux.logging_utils import setup_logging  # fallback (older layout)
+
+# legacy simple commands
+from scifi_demux.io_utils import find_fastqs, ensure_dir
+from scifi_demux.renaming import plan_renames, apply_renames
+from scifi_demux.demux import run_demux
+
+# state + step1/step2
+from scifi_demux.utils.state import (
+    STATE_PATH_DEFAULT,
+    load_state,
+    save_state,
+    ensure_state,
+    add_or_get_task,
+    iter_tasks,
+)
+from scifi_demux.steps.step1 import (
+    plan_chunks,
+    run_step1_local,
+    run_step1_hpc,
+    worker_chunk,
+    report_missing_chunks,
+    merge_library,
+    wait_and_maybe_merge,
+)
+from scifi_demux.steps.step2 import (
+    run_step2_for_sample_genome,  # once you wire it in
+)
+
+app = typer.Typer(
+    add_completion=False,
+    help="scifi-ATAC FASTQ renaming, demultiplexing, mapping, and cleanup",
+)
+console = Console()
 
 from scifi_demux.utils.state import (
     STATE_PATH_DEFAULT,
@@ -28,27 +68,6 @@ from scifi_demux.steps.step1 import (
 app = typer.Typer(add_completion=False, help="scifi‑ATAC: Step 1 (demux) and Step 2 (map+clean) with resume")
 console = Console()
 
-# src/scifi_demux/cli.py
-from __future__ import annotations
-
-import os
-from pathlib import Path
-from typing import Optional, List
-
-import typer
-from rich.table import Table
-from rich.console import Console
-
-# logging
-try:
-    from .utils.logging import setup_logging  # new location
-except ImportError:
-    from .logging_utils import setup_logging  # fallback (older layout)
-
-# legacy simple commands
-from .io_utils import find_fastqs, ensure_dir
-from .renaming import plan_renames, apply_renames
-from .demux import run_demux
 
 # state + step1/step2
 from .utils.state import (
