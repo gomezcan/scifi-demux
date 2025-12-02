@@ -1,8 +1,10 @@
 # src/scifi_demux/cli.py
 from __future__ import annotations
+
 import os
 from pathlib import Path
 from typing import Optional, List
+
 import typer
 from rich.table import Table
 from rich.console import Console
@@ -34,10 +36,13 @@ from .steps.step1 import (
     worker_chunk,
     report_missing_chunks,
     merge_library,
-    wait_and_maybe_merge
+    wait_and_maybe_merge,
 )
 
-app = typer.Typer(add_completion=False, help="scifi-ATAC FASTQ renaming & demultiplexing wrapper")
+app = typer.Typer(
+    add_completion=False,
+    help="scifi-ATAC FASTQ renaming & demultiplexing wrapper",
+)
 console = Console()
 
 
@@ -51,7 +56,13 @@ def _main(verbose: int = typer.Option(0, "-v", count=True, help="-v/-vv for more
 # ------------------------------------------------------------------------------------
 @app.command()
 def rename(
-    fastq_dir: Path = typer.Option(..., exists=True, file_okay=False, readable=True, help="Input FASTQ directory"),
+    fastq_dir: Path = typer.Option(
+        ...,
+        exists=True,
+        file_okay=False,
+        readable=True,
+        help="Input FASTQ directory",
+    ),
     plate: str = typer.Option(..., help="Plate identifier, e.g., PlateA"),
     well: str = typer.Option(..., help="Well identifier, e.g., A01"),
     out: Path = typer.Option(..., help="Output directory for renamed files"),
@@ -93,7 +104,7 @@ def demux_sample_design(
 
 
 # ------------------------------------------------------------------------------------
-# helper
+# helpers
 # ------------------------------------------------------------------------------------
 
 def _read_array_id_from_env() -> int | None:
@@ -105,6 +116,39 @@ def _read_array_id_from_env() -> int | None:
             except ValueError:
                 pass
     return None
+
+
+def _discover_step2_fastqs_from_step1(work_root: Path, sample: str) -> List[Path]:
+    """
+    Given a step1 work_root and sample/library name, locate input FASTQs for step2.
+
+    Priority:
+      1) <work_root>/<sample>.fastq(.gz)
+      2) <work_root>/sample/combined/*.fastq*
+    """
+    # Direct files in work_root
+    direct = work_root / f"{sample}.fastq"
+    direct_gz = work_root / f"{sample}.fastq.gz"
+
+    if direct.exists():
+        return [direct]
+    if direct_gz.exists():
+        return [direct_gz]
+
+    # Fallback: combined dir
+    combined_dir = work_root / "sample" / "combined"
+    if not combined_dir.exists():
+        raise FileNotFoundError(
+            f"Could not find FASTQs for sample={sample}. "
+            f"Tried {direct}, {direct_gz}, and combined dir {combined_dir}"
+        )
+
+    fastqs = sorted(combined_dir.glob("*.fastq*"))
+    if not fastqs:
+        raise FileNotFoundError(f"No FASTQs found in combined dir: {combined_dir}")
+
+    return fastqs
+
 
 # ------------------------------------------------------------------------------------
 # Status
@@ -143,15 +187,19 @@ def step1_plan(
     library: str = typer.Option(...),
     raw_dir: Path = typer.Option(..., exists=True, file_okay=False),
     chunks: int = typer.Option(..., help="Number of chunks to split into"),
-    work_root: Path = typer.Option(None, help="Work directory; defaults to '<library>_work'"),
+    work_root: Optional[Path] = typer.Option(
+        None,
+        help="Work directory; defaults to '<library>_work'",
+    ),
 ):
     # default to "<library>_work" if not provided
     if work_root is None:
         work_root = Path(f"{library}_work")
-    
+
     work_root.mkdir(parents=True, exist_ok=True)
     plan = plan_chunks(raw_dir=raw_dir, library=library, work_root=work_root, chunks=chunks)
     typer.echo(str(plan))
+
 
 def _validate_layout(value: str) -> str:
     # Accept the sentinel keyword
@@ -163,12 +211,21 @@ def _validate_layout(value: str) -> str:
         raise typer.BadParameter(f"--layout must be 'builtin' or a readable file. Not found: {value}")
     return str(p.resolve())
 
+
 @step1_app.command("run")
 def step1_run(
     library: str = typer.Option(..., help="Library / FASTQ prefix"),
-    raw_dir: Path = typer.Option(..., exists=True, file_okay=False, dir_okay=True,
-                                 help="Dir with {library}_R[1,2,3].fastq.gz"),
-    design: Optional[Path] = typer.Option(None, help="PlateDesign_*.txt; omit for per-well outputs"),
+    raw_dir: Path = typer.Option(
+        ...,
+        exists=True,
+        file_okay=False,
+        dir_okay=True,
+        help="Dir with {library}_R[1,2,3].fastq.gz",
+    ),
+    design: Optional[Path] = typer.Option(
+        None,
+        help="PlateDesign_*.txt; omit for per-well outputs",
+    ),
     layout: str = typer.Option(
         "builtin",
         callback=_validate_layout,  # accepts 'builtin' or resolves a readable file path
@@ -176,12 +233,27 @@ def step1_run(
         show_default=True,
     ),
     mode: str = typer.Option("local", help="local|hpc"),
-    threads: int = typer.Option(8, help="LOCAL: parallel jobs; HPC default chunk count if --chunks omitted"),
-    chunks: Optional[int] = typer.Option(None, help="HPC: total chunks (defaults to --threads)"),
-    follow: bool = typer.Option(False, help="LOCAL: merge/QC after fan-out; HPC: ignored"),
+    threads: int = typer.Option(
+        8,
+        help="LOCAL: parallel jobs; HPC: default chunk count if --chunks omitted",
+    ),
+    chunks: Optional[int] = typer.Option(
+        None,
+        help="HPC: total chunks (defaults to --threads)",
+    ),
+    follow: bool = typer.Option(
+        False,
+        help="LOCAL: merge/QC after fan-out; HPC: follow handled by array merge task",
+    ),
     poll_interval: int = typer.Option(60, help="Seconds between progress checks"),
-    max_wait: str = typer.Option("auto", help="Max wait (e.g., 12h, 3600s). 'auto'=scheduler timelimit; 0=unlimited"),
-    work_root: Optional[Path] = typer.Option(None, help="Work directory; defaults to '<library>_work'"),
+    max_wait: str = typer.Option(
+        "auto",
+        help="Max wait (e.g., 12h, 3600s). 'auto'=scheduler timelimit; 0=unlimited",
+    ),
+    work_root: Optional[Path] = typer.Option(
+        None,
+        help="Work directory; defaults to '<library>_work'",
+    ),
 ):
     setup_logging(1)
 
@@ -194,31 +266,42 @@ def step1_run(
     if design is not None and not design.exists():
         raise typer.BadParameter(f"--design not found: {design}")
 
-    # LOCAL fan-out → optional merge
+    # LOCAL mode: use run_step1_local (GNU parallel fan-out)
     if mode == "local":
-        total_chunks = max(1, threads)
-        plan_path = work_root / "run_plan.step1.chunks.tsv"
-        if not plan_path.exists():
-            plan_path = plan_chunks(raw_dir=raw_dir, library=library, work_root=work_root, chunks=total_chunks)
-        else:
-            plan_path = plan_path.resolve()
-
-        for idx in range(1, total_chunks + 1):
-            worker_chunk(plan=plan_path, idx=idx, layout=layout, design=design, mode="local")
-
+        total_chunks = chunks if chunks is not None else max(1, threads)
+        # run_step1_local currently always uses <library>_work internally;
+        # plan is written into work_root we pass here.
+        # We ignore work_root override for local for now to keep step1.py simple.
+        run_step1_local(
+            library=library,
+            raw_dir=raw_dir,
+            design=design,
+            layout=layout,
+            chunks=total_chunks,
+            parallel_jobs=threads,
+        )
         if follow:
-            wait_and_maybe_merge(library=library, work_root=work_root,
-                                 poll_interval=poll_interval, max_wait=max_wait)
+            wait_and_maybe_merge(
+                library=library,
+                work_root=Path(f"{library}_work"),
+                poll_interval=poll_interval,
+                max_wait=max_wait,
+            )
         return
 
-    # HPC array mode (workers 1..N, merge at N+1)
+    # HPC array mode
     total_chunks = chunks if chunks is not None else max(1, threads)
     if total_chunks < 1:
         raise typer.BadParameter("--chunks/--threads must be >= 1")
 
     plan_path = work_root / "run_plan.step1.chunks.tsv"
     if not plan_path.exists():
-        plan_path = plan_chunks(raw_dir=raw_dir, library=library, work_root=work_root, chunks=total_chunks)
+        plan_path = plan_chunks(
+            raw_dir=raw_dir,
+            library=library,
+            work_root=work_root,
+            chunks=total_chunks,
+        )
     else:
         plan_path = plan_path.resolve()
 
@@ -227,8 +310,12 @@ def step1_run(
         typer.echo("[warn] No array env detected; running all chunks serially then merging.")
         for idx in range(1, total_chunks + 1):
             worker_chunk(plan=plan_path, idx=idx, layout=layout, design=design, mode="hpc")
-        wait_and_maybe_merge(library=library, work_root=work_root,
-                             poll_interval=poll_interval, max_wait=max_wait)
+        wait_and_maybe_merge(
+            library=library,
+            work_root=work_root,
+            poll_interval=poll_interval,
+            max_wait=max_wait,
+        )
         return
 
     # Roles: 1..N workers, N+1 merge/QC
@@ -236,30 +323,38 @@ def step1_run(
         worker_chunk(plan=plan_path, idx=array_id, layout=layout, design=design, mode="hpc")
         return
     if array_id == total_chunks + 1:
-        wait_and_maybe_merge(library=library, work_root=work_root,
-                             poll_interval=poll_interval, max_wait=max_wait)
+        wait_and_maybe_merge(
+            library=library,
+            work_root=work_root,
+            poll_interval=poll_interval,
+            max_wait=max_wait,
+        )
         return
 
     raise typer.BadParameter(
         f"Array index {array_id} out of range for chunks={total_chunks}. "
-        f"Submit as --array=1-{total_chunks+1} so the last task merges."
+        f"Submit as --array=1-{total_chunks+1} so the last task merges.",
     )
 
 
 @step1_app.command("worker-chunk")
 def step1_worker_chunk(
     plan: Path = typer.Option(..., exists=True, help="run_plan.step1.chunks.tsv"),
-    array_id: int = typer.Option(-1, help="1-based row index; if -1, read from env (SLURM/PBS/SGE/LSF)"),
+    array_id: int = typer.Option(
+        -1,
+        help="1-based row index; if -1, read from env (SLURM/PBS/SGE/LSF)",
+    ),
     layout: Optional[str] = typer.Option(None, help="Path or 'builtin' (default)"),
     design: Optional[Path] = typer.Option(None),
     mode: str = typer.Option("local", help="local|hpc (affects threading policy)"),
 ):
     if array_id < 0:
-        for var in ("SLURM_ARRAY_TASK_ID", "PBS_ARRAYID", "SGE_TASK_ID", "LSB_JOBINDEX", "ARRAY_ID"):
-            if var in os.environ:
-                array_id = int(os.environ[var]); break
+        env_id = _read_array_id_from_env()
+        if env_id is None:
+            raise typer.BadParameter("array_id not provided and no known ARRAY env var found")
+        array_id = env_id
     if array_id < 1:
-        raise typer.BadParameter("array_id not provided and no known ARRAY env var found")
+        raise typer.BadParameter("array_id must be >= 1")
     worker_chunk(plan=plan, idx=array_id, layout=layout, design=design, mode=mode)
 
 
@@ -267,7 +362,10 @@ def step1_worker_chunk(
 def step1_check(work_root: Path = typer.Option(..., help="<LIB>_work directory")):
     missing = report_missing_chunks(work_root)
     if missing:
-        console.print(f"[red]Missing demux sentinels for chunks[/]: {', '.join(map(str, missing))}")
+        console.print(
+            "[red]Missing demux sentinels for chunks[/]: "
+            + ", ".join(map(str, missing))
+        )
         raise typer.Exit(1)
     console.print("[green]All chunk demux sentinels present. Safe to merge.")
 
@@ -293,15 +391,15 @@ def step1_report(
     library: str = typer.Option(...),
     work_root: Path = typer.Option(..., exists=True),
 ):
-    # re-aggregate without re-merging:
-    # factor out the aggregation above into a helper, call it here.
+    # re-aggregate without re-merging
     from scifi_demux.steps.step1 import _aggregate_counts_only
+
     _aggregate_counts_only(library=library, work_root=work_root)
     console.print(f"[bold green]Wrote[/] counts to {work_root}/qc/summary")
 
 
 # ------------------------------------------------------------------------------------
-# Step 2 (Map + Clean) — placeholders wired to state
+# Step 2 (Map + Clean)
 # ------------------------------------------------------------------------------------
 step2_app = typer.Typer(help="Step 2: genome index resolve → map → clean (8 sub-steps)")
 app.add_typer(step2_app, name="step2")
@@ -309,7 +407,11 @@ app.add_typer(step2_app, name="step2")
 
 @step2_app.command("plan")
 def step2_plan(
-    genome_map: Path = typer.Option(..., exists=True, help="TSV: sample_base, target_genome, ref_path"),
+    genome_map: Path = typer.Option(
+        ...,
+        exists=True,
+        help="TSV: sample_base, target_genome, ref_path",
+    ),
     state: Path = typer.Option(STATE_PATH_DEFAULT),
 ):
     s = ensure_state(state)
@@ -324,7 +426,13 @@ def step2_plan(
                 raise typer.BadParameter(f"Bad line (expect 3 cols): {ln}")
             group, genome, ref_path = cols[0], cols[1], cols[2]
             task_id = f"step2:group:{group}:genome:{genome}"
-            task = add_or_get_task(s, task_id, kind="step2", group=group, genome=genome)
+            task = add_or_get_task(
+                s,
+                task_id,
+                kind="step2",
+                group=group,
+                genome=genome,
+            )
             step_keys = ["index", "map"] + [f"clean_{i}" for i in range(1, 9)]
             for k in step_keys:
                 task.setdefault("steps", {}).setdefault(k, {"status": "pending"})
@@ -340,23 +448,71 @@ def step2_plan(
 def step2_run(
     mode: str = typer.Option("local", help="local|hpc"),
     threads_per_task: int = typer.Option(24, min=1),
+    outdir: Path = typer.Option(..., help="Output directory"),
     state: Path = typer.Option(STATE_PATH_DEFAULT),
     dry_run: bool = typer.Option(True),
+    sample: str = typer.Option(
+        ...,
+        help="Sample/library name for discovering step1 FASTQs",
+    ),
+    from_step1_work_root: Optional[Path] = typer.Option(
+        None,
+        "--from-step1-work-root",
+        exists=True,
+        file_okay=False,
+        dir_okay=True,
+        help=(
+            "Path to the step1 work_root directory for this library. "
+            "If provided, FASTQs will be auto-discovered for `sample`."
+        ),
+    ),
 ):
+    """
+    Step 2 core logic.
+
+    Currently this is a scheduler/inspection stub:
+      - Lists pending step2 mapping tasks from the state file.
+      - Optionally discovers input FASTQs produced by step1 for a given sample
+        when --from-step1-work-root is supplied, using the rule:
+          1) <work_root>/<sample>.fastq(.gz)
+          2) <work_root>/sample/combined/*.fastq*
+    """
+    # Discover FASTQs from step1 workspace if requested
+    if from_step1_work_root is not None:
+        fastqs = _discover_step2_fastqs_from_step1(
+            work_root=from_step1_work_root,
+            sample=sample,
+        )
+        console.print(
+            f"[bold]Discovered[/] {len(fastqs)} FASTQ(s) for sample='{sample}' "
+            f"from step1 work_root={from_step1_work_root}"
+        )
+        for fq in fastqs:
+            console.print(f"  - {fq}")
+
     s = ensure_state(state)
     pending = [
-        t for t in iter_tasks(s)
+        t
+        for t in iter_tasks(s)
         if t.get("kind") == "step2"
         and t.get("steps", {}).get("map", {}).get("status") != "done"
     ]
-    console.print(f"[bold]Step 2[/] mode={mode} threads={threads_per_task} dry_run={dry_run}")
+    console.print(
+        f"[bold]Step 2[/] mode={mode} threads={threads_per_task} dry_run={dry_run}"
+    )
     console.print(f"Pending mapping tasks: {len(pending)}")
     if dry_run:
         console.print("[yellow]Dry-run mode: showing first 10 pending tasks[/]")
         for t in pending[:10]:
-            console.print(f" - {t['id']} ref={t.get('params',{}).get('ref_path','?')}")
+            console.print(
+                f" - {t['id']} "
+                f"ref={t.get('params', {}).get('ref_path', '?')}"
+            )
         if len(pending) > 10:
             console.print(f" - ... and {len(pending) - 10} more tasks")
         console.print("[yellow]Use --dry-run False to execute these tasks[/]")
     else:
-        console.print("Execution wiring will call into steps/step2.py (to be filled next)")
+        console.print(
+            "Execution wiring will call into steps/step2.py "
+            "(to be filled with mapping/cleaning implementation)."
+        )
