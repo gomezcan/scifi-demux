@@ -12,7 +12,6 @@ Step 2 core:
 """
 
 from __future__ import annotations
-
 from pathlib import Path
 from typing import List
 import subprocess
@@ -282,7 +281,6 @@ def run_scifi_cleaning_pipeline(
             threads=threads,
             tissue_label="leaf",  # or make this configurable later
         )
-
 
     # 5) Index final BAM
     cmd_index = [
