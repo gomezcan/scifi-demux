@@ -11,8 +11,8 @@ def setup_logging(verbosity: int = 0) -> None:
   # Clear existing handlers in case of re‑init (pytest, notebooks)
   for h in list(root.handlers):
     root.removeHandler(h)
-    rich = RichHandler(rich_tracebacks=True, show_time=False)
-    root.addHandler(rich)
+  rich = RichHandler(rich_tracebacks=True, show_time=False)
+  root.addHandler(rich)
     
 def get_logger(name: str):
   return getLogger(name)

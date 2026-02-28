@@ -1,11 +1,12 @@
 from __future__ import annotations
 from pathlib import Path
 from typing import Dict
+import logging
+
 from ..config import Design
 from ..io_utils import ensure_dir, copy_or_link
-from ..logging_utils import get_logger
 
-log = get_logger(__name__)
+log = logging.getLogger(__name__)
 
 def _well_aliases(design: Design) -> Dict[str, str]:
   """Map 'Plate:Well' -> sample name"""

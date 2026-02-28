@@ -17,6 +17,7 @@ from typing import List
 import subprocess
 
 
+from scifi_demux.io_utils import legacy_script_path
 from scifi_demux.utils.scifi_cleanup import scifi_cleanup_bam
 from scifi_demux.utils.scifi_fixBC import process_and_count
 
@@ -197,9 +198,9 @@ def run_scifi_cleaning_pipeline(
       - 10x whitelist check + Tn5 1-mismatch correction
       - Attach BC tag, write <base>.mq{mapq_min}.BC.bam
 
-    Legacy stages:
+    Subsequent stages:
       - Picard MarkDuplicates (BARCODE_TAG=BC)
-      - 1_5_scifi_fixBC.pl  (multi-mapping + BC fix; writes *_rmdup.mm.bam + *_bc_counts.txt)
+      - scifi_fixBC.process_and_count (multi-mapping + BC fix; writes *_rmdup.mm.bam + *_bc_counts.txt)
       - 1_6_scifi_makeTn5bed.py → BED → sort/uniq → pigz
       - per-BAM read counts and optional cleanup
     """
@@ -208,9 +209,8 @@ def run_scifi_cleaning_pipeline(
 
     threads_str = str(threads)
 
-    # Resolve legacy scripts from package data
-    s_fix_bc = get_scifi_script("1_5_scifi_fixBC.pl")
-    s_tn5_bed = get_scifi_script("1_6_scifi_makeTn5bed.py")
+    # Resolve legacy script for Tn5 BED generation
+    s_tn5_bed = legacy_script_path("1_6_scifi_makeTn5bed.py")
 
     # 1) Sort raw BAM from BWA
     bam_sort = out_bam_dir / f"{base}.rawSort.bam"

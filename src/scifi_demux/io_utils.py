@@ -43,9 +43,19 @@ def resolve_layout_path(layout: Optional[Union[str, Path]]) -> Path:
     return Path(layout)
 
 # --- filesystem helpers used by CLI / renaming ---
-def ensure_dir(d: Path) -> Path:
-    d.mkdir(parents=True, exist_ok=True)
-    return d
+from .utils.fs import ensure_dir  # canonical location; re-exported for compatibility
+
+
+def legacy_script_path(name: str) -> Path:
+    """Locate a legacy script bundled with the package."""
+    pkg_root = Path(__file__).resolve().parent
+    fs = pkg_root / "legacy_scripts" / name
+    if fs.exists():
+        return fs
+    raise FileNotFoundError(
+        f"Could not locate legacy script '{name}' (looked at {fs})"
+    )
+
 
 def find_fastqs(root: Path) -> List[Path]:
     """

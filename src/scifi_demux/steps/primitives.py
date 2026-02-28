@@ -205,22 +205,27 @@ def cutadapt_append_tn5_to_name(
 
 def demux_by_split_bc(layout_file: Path, sample_well_map: Path, input_fastq_gz: Path, out_dir: Path) -> Dict[str, Dict[str, int]]:
     """
-    Backwards-compatible shim calling the demux core, then counting per-sample outputs.
+    Backwards-compatible shim calling the demux core, returning per-sample counts.
 
     Returns:
-        { "<sample>": { "r1_reads": int, "r3_reads": int, "passed": int } }
+        { "<sample>": { "r1_reads": int, "r3_reads": int } }
+
+    The counts reflect the number of reads assigned to each sample from the
+    input FASTQ.  Whether `r1_reads` or `r3_reads` is populated depends on
+    whether the input filename contains ``_R1`` or ``_R3``.
     """
-    demux_split_barcodes(layout_file, input_fastq_gz, sample_well_map, output_dir=out_dir)
+    result = demux_split_barcodes(layout_file, input_fastq_gz, sample_well_map, output_dir=out_dir)
+
+    base = result.get("base", "")
+    is_r1 = "_R1" in base
+    is_r3 = "_R3" in base
 
     per_sample: Dict[str, Dict[str, int]] = {}
-    for smp_dir in sorted(out_dir.glob("*")):
-        if not smp_dir.is_dir():
-            continue
-        r1 = next(smp_dir.glob("*_R1.bc1.bc2.fastq.gz"), None)
-        r3 = next(smp_dir.glob("*_R3.bc1.bc2.fastq.gz"), None)
-        r1c = _count_fastq_reads(r1) if r1 else 0
-        r3c = _count_fastq_reads(r3) if r3 else 0
-        per_sample[smp_dir.name] = {"r1_reads": r1c, "r3_reads": r3c, "passed": min(r1c, r3c)}
+    for sample_name, count in result.get("per_sample", {}).items():
+        per_sample[sample_name] = {
+            "r1_reads": count if is_r1 else 0,
+            "r3_reads": count if is_r3 else 0,
+        }
     return per_sample
 
 

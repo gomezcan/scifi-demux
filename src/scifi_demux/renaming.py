@@ -2,10 +2,11 @@ from __future__ import annotations
 from pathlib import Path
 from dataclasses import dataclass
 from typing import Iterable
-from .io_utils import copy_or_link
-from .logging_utils import get_logger
+import logging
 
-log = get_logger(__name__)
+from .io_utils import copy_or_link
+
+log = logging.getLogger(__name__)
 
 @dataclass
 class RenamePlan:

@@ -1,19 +1,18 @@
 # If omitted at runtime, demux defaults to per-well (group=well)
 plates:
-- name: PlateA
-index: i7_A
-wells:
-A01: ATCGTAGC
-A02: CGTATGCA
-- name: PlateB
-index: i7_B
-wells:
-A01: TGCATGCA
-B12: GATCTGAC
-
+  - name: PlateA
+    index: i7_A
+    wells:
+      A01: ATCGTAGC
+      A02: CGTATGCA
+  - name: PlateB
+    index: i7_B
+    wells:
+      A01: TGCATGCA
+      B12: GATCTGAC
 
 samples:
-- name: Seedling_Heat
-wells: [PlateA:A01, PlateB:B12]
-- name: Seedling_Control
-wells: [PlateA:A02]
+  - name: Seedling_Heat
+    wells: [PlateA:A01, PlateB:B12]
+  - name: Seedling_Control
+    wells: [PlateA:A02]

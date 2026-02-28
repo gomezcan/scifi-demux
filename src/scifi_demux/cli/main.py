@@ -16,8 +16,10 @@ except ImportError:
     from scifi_demux.logging_utils import setup_logging  # fallback (older layout)
 
 # legacy simple commands
-from scifi_demux.io_utils import find_fastqs, ensure_dir
+from scifi_demux.io_utils import find_fastqs, ensure_dir, resolve_whitelist, resolve_tn5_bcs
 from scifi_demux.renaming import plan_renames, apply_renames
+from scifi_demux.config import Design
+from scifi_demux.strategies import demux_by_wells, demux_by_samples
 
 
 # state + step1/step2
@@ -136,6 +138,27 @@ def rename(
     ensure_dir(out)
     plans = [p.__class__(p.src, out / p.dst.name) for p in plans]
     apply_renames(plans, mode=mode, dry_run=dry_run)
+
+
+def run_demux(
+    strategy: str,
+    fastq_dir: Path,
+    design_yaml: Path,
+    out: Path,
+    mode: str = "link",
+    dry_run: bool = False,
+) -> None:
+    """Dispatch demux to the appropriate strategy."""
+    fastqs = find_fastqs(fastq_dir)
+    if not fastqs:
+        raise FileNotFoundError(f"No FASTQs found under {fastq_dir}")
+    design = Design.from_yaml(design_yaml)
+    if strategy == "wells-by-plate":
+        demux_by_wells(fastqs, design, out, mode=mode, dry_run=dry_run)
+    elif strategy == "sample-design":
+        demux_by_samples(fastqs, design, out, mode=mode, dry_run=dry_run)
+    else:
+        raise ValueError(f"Unknown demux strategy: {strategy}")
 
 
 demux_app = typer.Typer(help="Demultiplex FASTQs using different strategies")
@@ -479,11 +502,12 @@ def step2_run(
     mapq_min: int = typer.Option(20, help="Minimum MAPQ to keep (default: 20)"),
 ):
     """
-    Step 2 orchestrator (currently stub).
+    Step 2 orchestrator: map + clean for pending tasks.
 
     - Lists pending step2 mapping tasks from the state file.
     - Optionally discovers input FASTQs produced by step1 for a given sample
       when --from-step1-work-root is supplied.
+    - In execution mode (--dry-run False), runs mapping and cleaning for each task.
     """
     if from_step1_work_root is not None:
         fastqs = _discover_step2_fastqs_from_step1(
@@ -520,11 +544,50 @@ def step2_run(
             console.print(f" - ... and {len(pending) - 10} more tasks")
         console.print("[yellow]Use --dry-run False to execute these tasks (once wired).[/]")
     else:
-        console.print(
-            "[red]Execution not yet implemented[/]: "
-            "mapping/cleaning will be wired to steps/step2.py "
-            "run_step2_for_sample_genome() in a later revision."
-        )
+        whitelist_10x = resolve_whitelist(None)
+        whitelist_tn5 = resolve_tn5_bcs(None)
+
+        if from_step1_work_root is None:
+            console.print("[red]--from-step1-work-root is required for execution mode[/]")
+            raise typer.Exit(1)
+
+        r1_fqs = sorted(f for f in fastqs if "_R1" in f.name)
+        r3_fqs = sorted(f for f in fastqs if "_R3" in f.name)
+        if not r1_fqs or not r3_fqs:
+            console.print("[red]Could not find R1/R3 FASTQ pairs[/]")
+            raise typer.Exit(1)
+
+        from scifi_demux.utils.state import mark_task_step
+
+        for t in pending:
+            group = t.get("group", "unknown")
+            genome = t.get("genome", "unknown")
+            ref = Path(t.get("params", {}).get("ref_path", ""))
+
+            # Match FASTQs for this group (sample)
+            grp_r1 = [f for f in r1_fqs if group in f.name]
+            grp_r3 = [f for f in r3_fqs if group in f.name]
+            fq_r1 = grp_r1[0] if grp_r1 else r1_fqs[0]
+            fq_r3 = grp_r3[0] if grp_r3 else r3_fqs[0]
+
+            console.print(f"[bold]Running[/] step2 for group={group} genome={genome}")
+            run_step2_for_sample_genome(
+                sample_id=group,
+                genome_target=genome,
+                fq_r1=fq_r1,
+                fq_r3=fq_r3,
+                ref_path=ref,
+                out_root=outdir,
+                whitelist_10x=whitelist_10x,
+                whitelist_tn5=whitelist_tn5,
+                threads=threads_per_task,
+                mapq_min=mapq_min,
+                dry_run=False,
+            )
+            for step_key in t.get("steps", {}):
+                mark_task_step(s, t["id"], step_key, "done")
+            save_state(s, state)
+            console.print(f"[green]Completed[/] {t['id']}")
 
 
 # ------------------------------------------------------------------------------------

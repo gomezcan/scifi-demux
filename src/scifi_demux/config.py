@@ -1,5 +1,6 @@
 # src/scifi_demux/config.py
 from __future__ import annotations
+import warnings
 from pydantic import BaseModel, Field, model_validator
 from pathlib import Path
 from typing import Dict, List, Optional
@@ -24,7 +25,21 @@ class Design(BaseModel):
 
     @model_validator(mode="after")
     def _check(self):
-        # TODO: add validations if you want (e.g., unique wells, etc.)
+        # Build set of known plate:well references
+        plate_wells: set[str] = set()
+        for plate in self.plates:
+            for well_id in plate.wells:
+                plate_wells.add(f"{plate.name}:{well_id}")
+
+        # Warn about sample well references that don't match any plate well
+        for sample in self.samples:
+            for well_ref in sample.wells:
+                if ":" in well_ref and well_ref not in plate_wells:
+                    warnings.warn(
+                        f"Sample '{sample.name}' references well '{well_ref}' "
+                        f"which is not defined in any plate",
+                        stacklevel=2,
+                    )
         return self
 
     @classmethod

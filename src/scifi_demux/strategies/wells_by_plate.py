@@ -1,11 +1,12 @@
 from __future__ import annotations
 from pathlib import Path
 from typing import Iterable
+import logging
+
 from ..config import Design
 from ..io_utils import ensure_dir, copy_or_link
-from ..logging_utils import get_logger
 
-log = get_logger(__name__)
+log = logging.getLogger(__name__)
 
 def demux_by_wells(fastqs: list[Path], design: Design, out: Path, mode: str = "link", dry_run: bool = False) -> None:
   out = ensure_dir(out)
