@@ -194,10 +194,56 @@ Plan, then (initially) dry-run:
 scifi-demux step2 plan --genome-map example_configs/genome_map_design.tsv
 
 # local: sequential mapping (multi-threaded), cleaning after each mapping
-scifi-demux step2 run --mode local --threads-per-task 24 --dry-run
+scifi-demux step2 run --mode local \
+  --sample SampleExample1 \
+  --from-step1-work-root SampleExample1_work \
+  --outdir 3_Mapping \
+  --threads-per-task 24 \
+  --dry-run
+```
 
-# hpc: SLURM arrays (one task = one row)
-# scifi-demux step2 run --mode hpc --threads-per-task 24 --dry-run
+Execute (remove `--dry-run` or set `--dry-run False`):
+```bash
+scifi-demux step2 run --mode local \
+  --sample SampleExample1 \
+  --from-step1-work-root SampleExample1_work \
+  --outdir 3_Mapping \
+  --threads-per-task 24 \
+  --dry-run False
+```
+
+## Step 2 HPC mode — SLURM array (one task = one row)
+
+```bash
+# 1) Generate a SLURM array submission script
+scifi-demux step2 sbatch \
+  --plan run_plan.map.tsv \
+  --sample SampleExample1 \
+  --from-step1-work-root SampleExample1_work \
+  --outdir 3_Mapping \
+  --cpus 24 \
+  --mem 16G \
+  --time 24:00:00
+
+# 2) Submit the generated script
+sbatch 3_Mapping/slurm_logs/step2.slurm
+```
+
+Each SLURM array task processes one row from `run_plan.map.tsv` independently.
+
+Alternatively, call `step2 run --mode hpc` directly inside your own SBATCH script:
+```bash
+#!/bin/bash
+#SBATCH --array=1-N   # N = number of rows in run_plan.map.tsv
+
+scifi-demux step2 run --mode hpc \
+  --sample SampleExample1 \
+  --from-step1-work-root SampleExample1_work \
+  --outdir 3_Mapping \
+  --plan run_plan.map.tsv \
+  --threads-per-task 24 \
+  --dry-run False \
+  --resume
 ```
 
 ## Status & resume
@@ -205,8 +251,14 @@ scifi-demux step2 run --mode local --threads-per-task 24 --dry-run
 # See progress across all tasks
 scifi-demux status
 
-# Resume only pending work (applies to both steps)
-# scifi-demux step2 run --mode local --threads-per-task 24 --resume
+# Resume only pending work (skips tasks already completed)
+scifi-demux step2 run --mode local \
+  --sample SampleExample1 \
+  --from-step1-work-root SampleExample1_work \
+  --outdir 3_Mapping \
+  --threads-per-task 24 \
+  --dry-run False \
+  --resume
 ```
 
 ## MultiQC (summary report)
