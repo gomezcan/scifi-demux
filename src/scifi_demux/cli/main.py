@@ -70,9 +70,10 @@ def _discover_step2_fastqs_from_step1(work_root: Path, sample: str) -> List[Path
     Given a step1 work_root and sample/library name, locate input FASTQs for step2.
 
     Priority:
-      1) <work_root>/<sample>.fastq(.gz)
-      2) <work_root>/combined/*.fastq*          (current scifi-demux v2 layout)
-      3) <work_root>/sample/combined/*.fastq*   (fallback for older layouts)
+      1)   <work_root>/<sample>.fastq(.gz)
+      1.5) <work_root>/*.fastq*                  (Phase 2 merged layout)
+      2)   <work_root>/combined/*.fastq*          (current scifi-demux v2 layout)
+      3)   <work_root>/sample/combined/*.fastq*   (fallback for older layouts)
     """
     direct = work_root / f"{sample}.fastq"
     direct_gz = work_root / f"{sample}.fastq.gz"
@@ -82,7 +83,12 @@ def _discover_step2_fastqs_from_step1(work_root: Path, sample: str) -> List[Path
     if direct_gz.exists():
         return [direct_gz]
 
-    tried_dirs: List[str] = []
+    # Phase 2 merged layout: FASTQs directly in work_root
+    flat_fqs = sorted(work_root.glob("*.fastq*"))
+    if flat_fqs:
+        return flat_fqs
+
+    tried_dirs: List[str] = [str(work_root)]
 
     combined_v2 = work_root / "combined"
     if combined_v2.exists():
@@ -98,12 +104,12 @@ def _discover_step2_fastqs_from_step1(work_root: Path, sample: str) -> List[Path
             return fastqs
         tried_dirs.append(str(combined_legacy))
 
-    if not tried_dirs:
-        tried_dirs = [str(combined_v2), str(combined_legacy)]
+    if len(tried_dirs) == 1:
+        tried_dirs.extend([str(combined_v2), str(combined_legacy)])
 
     raise FileNotFoundError(
         f"Could not find FASTQs for sample={sample}. "
-        f"Tried {direct}, {direct_gz}, and combined dirs: {', '.join(tried_dirs)}"
+        f"Tried {direct}, {direct_gz}, and dirs: {', '.join(tried_dirs)}"
     )
 
 
@@ -551,9 +557,9 @@ def _run_step2_single_task(
                     return
                 break
 
-    # Match FASTQs for this group
-    grp_r1 = [f for f in r1_fqs if group in f.name]
-    grp_r3 = [f for f in r3_fqs if group in f.name]
+    # Match FASTQs for this group (exact prefix to avoid A1 matching A10)
+    grp_r1 = [f for f in r1_fqs if f.name.startswith(f"{group}_")]
+    grp_r3 = [f for f in r3_fqs if f.name.startswith(f"{group}_")]
     fq_r1 = grp_r1[0] if grp_r1 else r1_fqs[0]
     fq_r3 = grp_r3[0] if grp_r3 else r3_fqs[0]
 

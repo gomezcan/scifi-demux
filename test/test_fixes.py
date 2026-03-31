@@ -366,3 +366,152 @@ def test_step2_resume_skips_done(tmp_path: Path):
             )
     # Only Pool2 should have run (Pool1 was already done)
     assert call_log == ["Pool2"]
+
+
+# ---------------------------------------------------------------------------
+# Sentinel-based resume: mapping
+# ---------------------------------------------------------------------------
+def test_step2_map_sentinel(tmp_path: Path):
+    """run_bwa_mapping writes a map sentinel and skips on re-run."""
+    from scifi_demux.steps.step2 import run_bwa_mapping
+
+    out_dir = tmp_path / "bam"
+    sent_dir = tmp_path / "sent"
+    sent_dir.mkdir()
+
+    with patch("scifi_demux.steps.step2.subprocess.run") as mock_sub:
+        bam = run_bwa_mapping(
+            sample_id="S1", genome_target="G1",
+            fq_r1=Path("/fake/r1.fq"), fq_r3=Path("/fake/r3.fq"),
+            index_prefix=Path("/fake/idx"), out_dir=out_dir,
+            threads=1, dry_run=False, sent_dir=sent_dir,
+        )
+        first_calls = mock_sub.call_count
+        assert first_calls > 0, "Should have called subprocess"
+        assert (sent_dir / "S1_G1_scifiATAC.map.ok.json").exists()
+
+        # Second call: should skip entirely
+        mock_sub.reset_mock()
+        bam2 = run_bwa_mapping(
+            sample_id="S1", genome_target="G1",
+            fq_r1=Path("/fake/r1.fq"), fq_r3=Path("/fake/r3.fq"),
+            index_prefix=Path("/fake/idx"), out_dir=out_dir,
+            threads=1, dry_run=False, sent_dir=sent_dir,
+        )
+        assert mock_sub.call_count == 0, "Should have skipped (sentinel exists)"
+        assert bam2 == bam
+
+
+# ---------------------------------------------------------------------------
+# Sentinel-based resume: cleaning pipeline
+# ---------------------------------------------------------------------------
+def test_step2_cleaning_sentinels_skip(tmp_path: Path):
+    """run_scifi_cleaning_pipeline writes sentinels and skips when they exist."""
+    from scifi_demux.steps.step2 import run_scifi_cleaning_pipeline
+
+    bam_dir = tmp_path / "bam"
+    bed_dir = tmp_path / "bed"
+    sent_dir = tmp_path / "sent"
+    sent_dir.mkdir()
+    bam_raw = tmp_path / "raw.bam"
+    bam_raw.write_bytes(b"")
+    base = "S1_G1_scifiATAC"
+
+    with (
+        patch("scifi_demux.steps.step2.subprocess.run") as mock_sub,
+        patch("scifi_demux.steps.step2.scifi_cleanup_bam") as mock_cleanup,
+        patch("scifi_demux.steps.step2.process_and_count") as mock_fixbc,
+        patch("scifi_demux.steps.step2.legacy_script_path", return_value=Path("/fake/tn5.py")),
+    ):
+        run_scifi_cleaning_pipeline(
+            base=base, bam_raw=bam_raw,
+            out_bam_dir=bam_dir, out_bed_dir=bed_dir,
+            whitelist_10x=Path("/fake/wl10x"), whitelist_tn5=Path("/fake/wltn5"),
+            threads=1, mapq_min=20, dry_run=False, sent_dir=sent_dir,
+        )
+
+        # All 7 sentinels should exist
+        expected = ["sort", "bc_tag", "dedup", "fixbc", "index_bam", "tn5bed", "counts"]
+        for tag in expected:
+            assert (sent_dir / f"{base}.{tag}.ok.json").exists(), f"Missing sentinel: {tag}"
+
+        first_sub = mock_sub.call_count
+        first_cleanup = mock_cleanup.call_count
+        first_fixbc = mock_fixbc.call_count
+        assert first_sub > 0
+
+        # Second call: all stages skipped
+        mock_sub.reset_mock()
+        mock_cleanup.reset_mock()
+        mock_fixbc.reset_mock()
+
+        run_scifi_cleaning_pipeline(
+            base=base, bam_raw=bam_raw,
+            out_bam_dir=bam_dir, out_bed_dir=bed_dir,
+            whitelist_10x=Path("/fake/wl10x"), whitelist_tn5=Path("/fake/wltn5"),
+            threads=1, mapq_min=20, dry_run=False, sent_dir=sent_dir,
+        )
+        assert mock_sub.call_count == 0, "subprocess should not be called on resume"
+        assert mock_cleanup.call_count == 0, "scifi_cleanup_bam should not be called on resume"
+        assert mock_fixbc.call_count == 0, "process_and_count should not be called on resume"
+
+
+# ---------------------------------------------------------------------------
+# Pre-flight tool check
+# ---------------------------------------------------------------------------
+def test_step2_preflight_catches_missing_tools(tmp_path: Path):
+    """run_step2_for_sample_genome raises RuntimeError if tools are missing."""
+    from scifi_demux.steps.step2 import run_step2_for_sample_genome
+
+    with patch("scifi_demux.steps.primitives.shutil.which", return_value=None):
+        with pytest.raises(RuntimeError, match="Missing required executables"):
+            run_step2_for_sample_genome(
+                sample_id="test", genome_target="ref",
+                fq_r1=tmp_path / "r1.fq", fq_r3=tmp_path / "r3.fq",
+                ref_path=tmp_path / "ref.fa",
+                out_root=tmp_path / "out",
+                whitelist_10x=tmp_path / "wl10x",
+                whitelist_tn5=tmp_path / "wltn5",
+            )
+
+
+# ---------------------------------------------------------------------------
+# FASTQ discovery: flat layout (Phase 2 merged)
+# ---------------------------------------------------------------------------
+def test_discover_step2_fastqs_flat_layout(tmp_path: Path):
+    """Flat FASTQs in work_root are found when combined/ does not exist."""
+    from scifi_demux.cli.main import _discover_step2_fastqs_from_step1
+
+    (tmp_path / "Pool1_R1.bc1.bc2.fastq.gz").write_bytes(b"")
+    (tmp_path / "Pool1_R3.bc1.bc2.fastq.gz").write_bytes(b"")
+
+    result = _discover_step2_fastqs_from_step1(tmp_path, "Pool1")
+    assert len(result) == 2
+    names = {f.name for f in result}
+    assert "Pool1_R1.bc1.bc2.fastq.gz" in names
+    assert "Pool1_R3.bc1.bc2.fastq.gz" in names
+
+
+# ---------------------------------------------------------------------------
+# FASTQ matching: exact prefix (no substring collision)
+# ---------------------------------------------------------------------------
+def test_step2_exact_prefix_no_substring_match(tmp_path: Path):
+    """Group 'A1' must NOT match 'A10_R1...' files."""
+    fq_dir = tmp_path / "fqs"
+    fq_dir.mkdir()
+    for g in ("A1", "A10", "A11"):
+        (fq_dir / f"{g}_R1.bc1.bc2.fastq.gz").write_bytes(b"")
+        (fq_dir / f"{g}_R3.bc1.bc2.fastq.gz").write_bytes(b"")
+
+    r1_fqs = sorted(fq_dir.glob("*_R1*"))
+    r3_fqs = sorted(fq_dir.glob("*_R3*"))
+    group = "A1"
+
+    # This is the exact logic now used in _run_step2_single_task
+    grp_r1 = [f for f in r1_fqs if f.name.startswith(f"{group}_")]
+    grp_r3 = [f for f in r3_fqs if f.name.startswith(f"{group}_")]
+
+    assert len(grp_r1) == 1, f"Expected 1 R1 match, got {len(grp_r1)}: {grp_r1}"
+    assert len(grp_r3) == 1, f"Expected 1 R3 match, got {len(grp_r3)}: {grp_r3}"
+    assert grp_r1[0].name == "A1_R1.bc1.bc2.fastq.gz"
+    assert grp_r3[0].name == "A1_R3.bc1.bc2.fastq.gz"

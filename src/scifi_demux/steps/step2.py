@@ -18,8 +18,10 @@ import subprocess
 
 
 from scifi_demux.io_utils import legacy_script_path
+from scifi_demux.utils.fs import write_ok, has_ok
 from scifi_demux.utils.scifi_cleanup import scifi_cleanup_bam
 from scifi_demux.utils.scifi_fixBC import process_and_count
+from .primitives import _which_or_raise
 
 
 # ---------------------------------------------------------------------------
@@ -122,6 +124,7 @@ def run_bwa_mapping(
     out_dir: Path,
     threads: int = 8,
     dry_run: bool = False,
+    sent_dir: Path | None = None,
 ) -> Path:
     """
     Run bwa mem for one sample × genome and write a raw BAM.
@@ -134,6 +137,11 @@ def run_bwa_mapping(
     base = f"{sample_id}_{genome_target}_scifiATAC"
     sam_path = out_dir / f"{base}.raw.sam"
     bam_path = out_dir / f"{base}.raw.bam"
+
+    # Sentinel: skip if already mapped
+    if sent_dir is not None and has_ok(sent_dir / f"{base}.map"):
+        print(f"[step2] Skipping map (sentinel exists): {base}")
+        return bam_path
 
     print(
         f"[step2] Mapping sample={sample_id} to genome={genome_target} using index={index_prefix}"
@@ -171,6 +179,9 @@ def run_bwa_mapping(
     if not dry_run and sam_path.exists():
         sam_path.unlink()
 
+    if sent_dir is not None and not dry_run:
+        write_ok(sent_dir / f"{base}.map", {"step": "map", "output": str(bam_path)})
+
     return bam_path
 
 
@@ -188,6 +199,7 @@ def run_scifi_cleaning_pipeline(
     threads: int = 8,
     mapq_min: int = 20,
     dry_run: bool = False,
+    sent_dir: Path | None = None,
 ) -> None:
     """
     Run the scifi-ATAC cleaning pipeline for a given base name and raw BAM.
@@ -214,124 +226,158 @@ def run_scifi_cleaning_pipeline(
 
     # 1) Sort raw BAM from BWA
     bam_sort = out_bam_dir / f"{base}.rawSort.bam"
-    cmd_sort = [
-        "samtools",
-        "sort",
-        "-@",
-        threads_str,
-        "-o",
-        str(bam_sort),
-        str(bam_raw),
-    ]
-    _run(cmd_sort, dry_run=dry_run)
+    if sent_dir is None or not has_ok(sent_dir / f"{base}.sort"):
+        cmd_sort = [
+            "samtools",
+            "sort",
+            "-@",
+            threads_str,
+            "-o",
+            str(bam_sort),
+            str(bam_raw),
+        ]
+        _run(cmd_sort, dry_run=dry_run)
+        if sent_dir is not None and not dry_run:
+            write_ok(sent_dir / f"{base}.sort", {"step": "sort", "output": str(bam_sort)})
+    else:
+        print(f"[step2] Skipping sort (sentinel exists): {base}")
 
     # 2) Python barcode cleanup + MAPQ filter → BC-tagged BAM
     bam_bc = out_bam_dir / f"{base}.mq{mapq_min}.BC.bam"
-    if dry_run:
-        print(
-            f"[step2] DRY-RUN: would run scifi_cleanup_bam("
-            f"input_bam={bam_sort}, output_bam={bam_bc}, "
-            f"whitelist_10x={whitelist_10x}, whitelist_tn5={whitelist_tn5}, "
-            f"min_mapq={mapq_min}, threads={threads})"
-        )
+    if sent_dir is None or not has_ok(sent_dir / f"{base}.bc_tag"):
+        if dry_run:
+            print(
+                f"[step2] DRY-RUN: would run scifi_cleanup_bam("
+                f"input_bam={bam_sort}, output_bam={bam_bc}, "
+                f"whitelist_10x={whitelist_10x}, whitelist_tn5={whitelist_tn5}, "
+                f"min_mapq={mapq_min}, threads={threads})"
+            )
+        else:
+            scifi_cleanup_bam(
+                input_bam=bam_sort,
+                output_bam=bam_bc,
+                whitelist_10x=whitelist_10x,
+                whitelist_tn5=whitelist_tn5,
+                min_mapq=mapq_min,
+                threads=threads,
+            )
+            if sent_dir is not None:
+                write_ok(sent_dir / f"{base}.bc_tag", {"step": "bc_tag", "output": str(bam_bc)})
     else:
-        scifi_cleanup_bam(
-            input_bam=bam_sort,
-            output_bam=bam_bc,
-            whitelist_10x=whitelist_10x,
-            whitelist_tn5=whitelist_tn5,
-            min_mapq=mapq_min,
-            threads=threads,
-        )
+        print(f"[step2] Skipping bc_tag (sentinel exists): {base}")
 
     # 3) Remove duplicates with Picard MarkDuplicates
     bam_rmdup = out_bam_dir / f"{base}.mq{mapq_min}.BC.rmdup.bam"
     metrics = out_bam_dir / f"{base}.metrics"
-    cmd_picard = [
-        "picard",
-        "MarkDuplicates",
-        f"I={bam_bc}",
-        f"O={bam_rmdup}",
-        f"METRICS_FILE={metrics}",
-        "REMOVE_DUPLICATES=true",
-        "BARCODE_TAG=BC",
-        "ASSUME_SORT_ORDER=coordinate",
-        "MAX_FILE_HANDLES_FOR_READ_ENDS_MAP=1000",
-    ]
-    _run(cmd_picard, dry_run=dry_run)
-    
+    if sent_dir is None or not has_ok(sent_dir / f"{base}.dedup"):
+        cmd_picard = [
+            "picard",
+            "MarkDuplicates",
+            f"I={bam_bc}",
+            f"O={bam_rmdup}",
+            f"METRICS_FILE={metrics}",
+            "REMOVE_DUPLICATES=true",
+            "BARCODE_TAG=BC",
+            "ASSUME_SORT_ORDER=coordinate",
+            "MAX_FILE_HANDLES_FOR_READ_ENDS_MAP=1000",
+        ]
+        _run(cmd_picard, dry_run=dry_run)
+        if sent_dir is not None and not dry_run:
+            write_ok(sent_dir / f"{base}.dedup", {"step": "dedup", "output": str(bam_rmdup)})
+    else:
+        print(f"[step2] Skipping dedup (sentinel exists): {base}")
+
     # -----------------------------------------------------------
     # 4) fix multi-mapping & BC (Replaces 1_5_scifi_fixBC.pl)
-    # -----------------------------------------------------------  
+    # -----------------------------------------------------------
     bam_mm = out_bam_dir / f"{base}.mq{mapq_min}.BC.rmdup.mm.bam"
     bc_counts_out = out_bam_dir / f"{base}_bc_counts.txt"
-    if dry_run:
-        print(
-            f"[step2] DRY-RUN: would run scifi_fixBC.process_and_count("
-            f"input_bam={bam_rmdup}, output_bam={bam_mm}, "
-            f"counts_file={bc_counts_out}, library_tag={base}, "
-            f"threads={threads})"
-        )
+    if sent_dir is None or not has_ok(sent_dir / f"{base}.fixbc"):
+        if dry_run:
+            print(
+                f"[step2] DRY-RUN: would run scifi_fixBC.process_and_count("
+                f"input_bam={bam_rmdup}, output_bam={bam_mm}, "
+                f"counts_file={bc_counts_out}, library_tag={base}, "
+                f"threads={threads})"
+            )
+        else:
+            process_and_count(
+                input_bam=str(bam_rmdup),
+                output_bam=str(bam_mm),
+                counts_file=str(bc_counts_out),
+                library_tag=base,   # same as Perl script's last arg
+                threads=threads,
+                tissue_label="leaf",  # or make this configurable later
+            )
+            if sent_dir is not None:
+                write_ok(sent_dir / f"{base}.fixbc", {"step": "fixbc", "output": str(bam_mm)})
     else:
-        process_and_count(
-            input_bam=str(bam_rmdup),
-            output_bam=str(bam_mm),
-            counts_file=str(bc_counts_out),
-            library_tag=base,   # same as Perl script's last arg
-            threads=threads,
-            tissue_label="leaf",  # or make this configurable later
-        )
+        print(f"[step2] Skipping fixbc (sentinel exists): {base}")
 
     # 5) Index final BAM
-    cmd_index = [
-        "samtools",
-        "index",
-        "-@",
-        threads_str,
-        str(bam_mm),
-    ]
-    _run(cmd_index, dry_run=dry_run)
+    if sent_dir is None or not has_ok(sent_dir / f"{base}.index_bam"):
+        cmd_index = [
+            "samtools",
+            "index",
+            "-@",
+            threads_str,
+            str(bam_mm),
+        ]
+        _run(cmd_index, dry_run=dry_run)
+        if sent_dir is not None and not dry_run:
+            write_ok(sent_dir / f"{base}.index_bam", {"step": "index_bam", "output": str(bam_mm) + ".bai"})
+    else:
+        print(f"[step2] Skipping index_bam (sentinel exists): {base}")
 
     # 6) Make Tn5 BED and compress
     bed_path = out_bed_dir / f"{base}.mq{mapq_min}.tn5.bed"
-    cmd_tn5 = (
-        f"python {s_tn5_bed} {bam_mm} "
-        f"| sort -k1,1 -k2,2n "
-        f"| uniq "
-        f"> {bed_path}"
-    )
-    _run(cmd_tn5, dry_run=dry_run)
+    if sent_dir is None or not has_ok(sent_dir / f"{base}.tn5bed"):
+        cmd_tn5 = (
+            f"python {s_tn5_bed} {bam_mm} "
+            f"| sort -k1,1 -k2,2n "
+            f"| uniq "
+            f"> {bed_path}"
+        )
+        _run(cmd_tn5, dry_run=dry_run)
 
-    cmd_gzip = [
-        "pigz",
-        "-p",
-        threads_str,
-        str(bed_path),
-    ]
-    _run(cmd_gzip, dry_run=dry_run)
+        cmd_gzip = [
+            "pigz",
+            "-p",
+            threads_str,
+            str(bed_path),
+        ]
+        _run(cmd_gzip, dry_run=dry_run)
+        if sent_dir is not None and not dry_run:
+            write_ok(sent_dir / f"{base}.tn5bed", {"step": "tn5bed", "output": str(bed_path) + ".gz"})
+    else:
+        print(f"[step2] Skipping tn5bed (sentinel exists): {base}")
 
     # 7) Optional read counts
     proper_pairs_txt = out_bam_dir / f"{base}.mq{mapq_min}.BC.rmdup.proper_pairs.txt"
     proper_pairs_mm_txt = out_bam_dir / f"{base}.mq{mapq_min}.BC.rmdup.mm.proper_pairs.txt"
-
-    cmd_count_pp = [
-        "samtools",
-        "view",
-        "-@",
-        threads_str,
-        "-c",
-        str(bam_rmdup),
-    ]
-    cmd_count_pp_mm = [
-        "samtools",
-        "view",
-        "-@",
-        threads_str,
-        "-c",
-        str(bam_mm),
-    ]
-    _run(" ".join(str(x) for x in cmd_count_pp) + f" > {proper_pairs_txt}", dry_run=dry_run)
-    _run(" ".join(str(x) for x in cmd_count_pp_mm) + f" > {proper_pairs_mm_txt}", dry_run=dry_run)
+    if sent_dir is None or not has_ok(sent_dir / f"{base}.counts"):
+        cmd_count_pp = [
+            "samtools",
+            "view",
+            "-@",
+            threads_str,
+            "-c",
+            str(bam_rmdup),
+        ]
+        cmd_count_pp_mm = [
+            "samtools",
+            "view",
+            "-@",
+            threads_str,
+            "-c",
+            str(bam_mm),
+        ]
+        _run(" ".join(str(x) for x in cmd_count_pp) + f" > {proper_pairs_txt}", dry_run=dry_run)
+        _run(" ".join(str(x) for x in cmd_count_pp_mm) + f" > {proper_pairs_mm_txt}", dry_run=dry_run)
+        if sent_dir is not None and not dry_run:
+            write_ok(sent_dir / f"{base}.counts", {"step": "counts"})
+    else:
+        print(f"[step2] Skipping counts (sentinel exists): {base}")
 
     # 8) Optional cleanup of intermediates
     if not dry_run and bam_sort.exists():
@@ -373,10 +419,16 @@ def run_step2_for_sample_genome(
         <out_root>/<sample_id>/bed/
           <sample_id>_<genome_target>_scifiATAC.mq<mapq_min>.tn5.bed.gz
     """
+    _which_or_raise("bwa", "samtools", "picard", "pigz")
+
     out_root = out_root.resolve()
     sample_out_dir = out_root / sample_id
     bam_dir = sample_out_dir
     bed_dir = sample_out_dir / "bed"
+
+    # Sentinel directory for resume support
+    sent_dir = bam_dir / "_sentinels"
+    sent_dir.mkdir(parents=True, exist_ok=True)
 
     # 1) ensure index
     index_prefix = ensure_bwa_index(ref_path=ref_path, threads=threads, dry_run=dry_run)
@@ -391,6 +443,7 @@ def run_step2_for_sample_genome(
         out_dir=bam_dir,
         threads=threads,
         dry_run=dry_run,
+        sent_dir=sent_dir,
     )
 
     # 3) cleaning pipeline
@@ -405,4 +458,5 @@ def run_step2_for_sample_genome(
         threads=threads,
         mapq_min=mapq_min,
         dry_run=dry_run,
+        sent_dir=sent_dir,
     )
