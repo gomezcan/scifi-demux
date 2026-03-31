@@ -186,3 +186,183 @@ def test_config_no_warn_on_valid_ref():
         )
     plate_warnings = [x for x in w if "not defined in any plate" in str(x.message)]
     assert len(plate_warnings) == 0, f"Unexpected warnings: {plate_warnings}"
+
+
+# ---------------------------------------------------------------------------
+# Step 2 HPC mode helpers
+# ---------------------------------------------------------------------------
+def test_load_plan_row(tmp_path: Path):
+    from scifi_demux.cli.main import _load_plan_row, _count_plan_rows
+
+    tsv = tmp_path / "plan.tsv"
+    tsv.write_text("# header\nPool1\tB73\t/ref/B73\nPool2\tMo17\t/ref/Mo17\t/samples/P2\n")
+
+    assert _count_plan_rows(tsv) == 2
+
+    row1 = _load_plan_row(tsv, 1)
+    assert row1 == {"group": "Pool1", "genome": "B73", "ref_path": "/ref/B73"}
+
+    row2 = _load_plan_row(tsv, 2)
+    assert row2 == {"group": "Pool2", "genome": "Mo17", "ref_path": "/ref/Mo17", "sample_path": "/samples/P2"}
+
+    with pytest.raises(IndexError):
+        _load_plan_row(tsv, 0)
+    with pytest.raises(IndexError):
+        _load_plan_row(tsv, 3)
+
+
+def test_resolve_threads_hpc():
+    from scifi_demux.cli.main import _resolve_threads_hpc
+
+    # Local mode always returns CLI value
+    assert _resolve_threads_hpc("local", 24) == 24
+
+    # HPC mode without env returns CLI value
+    with patch.dict("os.environ", {}, clear=True):
+        assert _resolve_threads_hpc("hpc", 24) == 24
+
+    # HPC mode with SLURM env returns env value
+    with patch.dict("os.environ", {"SLURM_CPUS_PER_TASK": "16"}):
+        assert _resolve_threads_hpc("hpc", 24) == 16
+
+    # HPC mode with NSLOTS (SGE) returns env value
+    with patch.dict("os.environ", {"NSLOTS": "8"}, clear=True):
+        assert _resolve_threads_hpc("hpc", 24) == 8
+
+
+def _make_step2_fixtures(tmp_path):
+    """Create plan TSV, state file, and dummy FASTQs for step2 HPC tests."""
+    plan = tmp_path / "run_plan.map.tsv"
+    plan.write_text("Pool1\tB73\t/ref/B73\nPool2\tMo17\t/ref/Mo17\n")
+
+    state_path = tmp_path / "state.json"
+
+    # Dummy FASTQs
+    fq_dir = tmp_path / "combined"
+    fq_dir.mkdir()
+    (fq_dir / "Pool1_R1.bc1.bc2.fastq.gz").write_bytes(b"")
+    (fq_dir / "Pool1_R3.bc1.bc2.fastq.gz").write_bytes(b"")
+    (fq_dir / "Pool2_R1.bc1.bc2.fastq.gz").write_bytes(b"")
+    (fq_dir / "Pool2_R3.bc1.bc2.fastq.gz").write_bytes(b"")
+
+    return plan, state_path, fq_dir
+
+
+def test_step2_hpc_single_dispatch(tmp_path: Path):
+    """HPC mode with SLURM_ARRAY_TASK_ID=2 should process only row 2."""
+    from scifi_demux.cli.main import _run_step2_single_task, _load_plan_row
+    from scifi_demux.utils.state import ensure_state, add_or_get_task, save_state, iter_tasks
+
+    plan, state_path, fq_dir = _make_step2_fixtures(tmp_path)
+
+    # Seed state with both tasks
+    s = ensure_state(state_path)
+    for row_idx in (1, 2):
+        row = _load_plan_row(plan, row_idx)
+        tid = f"step2:group:{row['group']}:genome:{row['genome']}"
+        t = add_or_get_task(s, tid, kind="step2", group=row["group"], genome=row["genome"])
+        for k in ["index", "map", "clean_1"]:
+            t.setdefault("steps", {}).setdefault(k, {"status": "pending"})
+    save_state(s, state_path)
+
+    r1_fqs = sorted(fq_dir.glob("*_R1*"))
+    r3_fqs = sorted(fq_dir.glob("*_R3*"))
+
+    with patch("scifi_demux.cli.main.run_step2_for_sample_genome") as mock_run:
+        _run_step2_single_task(
+            plan=plan, row_idx=2,
+            r1_fqs=r1_fqs, r3_fqs=r3_fqs,
+            outdir=tmp_path / "out",
+            whitelist_10x=Path("/fake/wl_10x"),
+            whitelist_tn5=Path("/fake/wl_tn5"),
+            threads=8, mapq_min=20,
+            state_obj=s, state_path=state_path,
+            resume=False, dry_run=False,
+        )
+        mock_run.assert_called_once()
+        call_kw = mock_run.call_args
+        assert call_kw.kwargs["sample_id"] == "Pool2"
+        assert call_kw.kwargs["genome_target"] == "Mo17"
+
+
+def test_step2_hpc_fallback_serial(tmp_path: Path):
+    """Without array env, HPC mode runs all rows serially."""
+    from scifi_demux.cli.main import _run_step2_single_task, _load_plan_row
+    from scifi_demux.utils.state import ensure_state, add_or_get_task, save_state
+
+    plan, state_path, fq_dir = _make_step2_fixtures(tmp_path)
+
+    s = ensure_state(state_path)
+    for row_idx in (1, 2):
+        row = _load_plan_row(plan, row_idx)
+        tid = f"step2:group:{row['group']}:genome:{row['genome']}"
+        t = add_or_get_task(s, tid, kind="step2", group=row["group"], genome=row["genome"])
+        for k in ["index", "map"]:
+            t.setdefault("steps", {}).setdefault(k, {"status": "pending"})
+    save_state(s, state_path)
+
+    r1_fqs = sorted(fq_dir.glob("*_R1*"))
+    r3_fqs = sorted(fq_dir.glob("*_R3*"))
+
+    call_log = []
+    with patch("scifi_demux.cli.main.run_step2_for_sample_genome") as mock_run:
+        mock_run.side_effect = lambda **kw: call_log.append(kw["sample_id"])
+        for row_idx in range(1, 3):
+            _run_step2_single_task(
+                plan=plan, row_idx=row_idx,
+                r1_fqs=r1_fqs, r3_fqs=r3_fqs,
+                outdir=tmp_path / "out",
+                whitelist_10x=Path("/fake/wl_10x"),
+                whitelist_tn5=Path("/fake/wl_tn5"),
+                threads=8, mapq_min=20,
+                state_obj=s, state_path=state_path,
+                resume=False, dry_run=False,
+            )
+    assert call_log == ["Pool1", "Pool2"]
+
+
+def test_step2_resume_skips_done(tmp_path: Path):
+    """Resume mode skips tasks already marked done in state."""
+    from scifi_demux.cli.main import _run_step2_single_task, _load_plan_row
+    from scifi_demux.utils.state import ensure_state, add_or_get_task, save_state
+
+    plan, state_path, fq_dir = _make_step2_fixtures(tmp_path)
+
+    # Seed state: Pool1 is done, Pool2 is pending
+    s = ensure_state(state_path)
+    row1 = _load_plan_row(plan, 1)
+    t1 = add_or_get_task(
+        s, f"step2:group:{row1['group']}:genome:{row1['genome']}",
+        kind="step2", group=row1["group"], genome=row1["genome"],
+    )
+    for k in ["index", "map"]:
+        t1.setdefault("steps", {})[k] = {"status": "done"}
+
+    row2 = _load_plan_row(plan, 2)
+    t2 = add_or_get_task(
+        s, f"step2:group:{row2['group']}:genome:{row2['genome']}",
+        kind="step2", group=row2["group"], genome=row2["genome"],
+    )
+    for k in ["index", "map"]:
+        t2.setdefault("steps", {})[k] = {"status": "pending"}
+    save_state(s, state_path)
+
+    r1_fqs = sorted(fq_dir.glob("*_R1*"))
+    r3_fqs = sorted(fq_dir.glob("*_R3*"))
+
+    call_log = []
+    with patch("scifi_demux.cli.main.run_step2_for_sample_genome") as mock_run:
+        mock_run.side_effect = lambda **kw: call_log.append(kw["sample_id"])
+        for row_idx in range(1, 3):
+            _run_step2_single_task(
+                plan=plan, row_idx=row_idx,
+                r1_fqs=r1_fqs, r3_fqs=r3_fqs,
+                outdir=tmp_path / "out",
+                whitelist_10x=Path("/fake/wl_10x"),
+                whitelist_tn5=Path("/fake/wl_tn5"),
+                threads=8, mapq_min=20,
+                state_obj=s, state_path=state_path,
+                resume=True, dry_run=False,
+            )
+    # Only Pool2 should have run (Pool1 was already done)
+    assert call_log == ["Pool2"]

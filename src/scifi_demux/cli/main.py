@@ -29,6 +29,7 @@ from scifi_demux.utils.state import (
     save_state,
     ensure_state,
     add_or_get_task,
+    mark_task_step,
     iter_tasks,
 )
 from scifi_demux.steps.step1 import (
@@ -104,6 +105,44 @@ def _discover_step2_fastqs_from_step1(work_root: Path, sample: str) -> List[Path
         f"Could not find FASTQs for sample={sample}. "
         f"Tried {direct}, {direct_gz}, and combined dirs: {', '.join(tried_dirs)}"
     )
+
+
+def _load_plan_row(plan_path: Path, row_idx: int) -> dict:
+    """Read 1-indexed row from run_plan.map.tsv (skip comments/blanks)."""
+    rows = [
+        ln.strip()
+        for ln in plan_path.read_text().splitlines()
+        if ln.strip() and not ln.startswith("#")
+    ]
+    if row_idx < 1 or row_idx > len(rows):
+        raise IndexError(
+            f"Row index {row_idx} out of range (plan has {len(rows)} rows)"
+        )
+    cols = rows[row_idx - 1].split("\t")
+    result = {"group": cols[0], "genome": cols[1], "ref_path": cols[2]}
+    if len(cols) > 3:
+        result["sample_path"] = cols[3]
+    return result
+
+
+def _count_plan_rows(plan_path: Path) -> int:
+    """Count non-comment, non-empty lines in a plan TSV."""
+    return len([
+        ln for ln in plan_path.read_text().splitlines()
+        if ln.strip() and not ln.startswith("#")
+    ])
+
+
+def _resolve_threads_hpc(mode: str, cli_threads: int) -> int:
+    """In HPC mode, prefer $SLURM_CPUS_PER_TASK or $NSLOTS; fall back to cli_threads."""
+    if mode == "hpc":
+        env_val = os.environ.get("SLURM_CPUS_PER_TASK") or os.environ.get("NSLOTS")
+        if env_val:
+            try:
+                return int(env_val)
+            except ValueError:
+                pass
+    return cli_threads
 
 
 # ------------------------------------------------------------------------------------
@@ -480,6 +519,72 @@ def step2_plan(
     console.print(f"[bold]Planned[/]: {len(lines)} mapping rows → {plan_path}")
 
 
+def _run_step2_single_task(
+    plan: Path,
+    row_idx: int,
+    r1_fqs: List[Path],
+    r3_fqs: List[Path],
+    outdir: Path,
+    whitelist_10x: Path,
+    whitelist_tn5: Path,
+    threads: int,
+    mapq_min: int,
+    state_obj: dict,
+    state_path: Path,
+    resume: bool,
+    dry_run: bool,
+) -> None:
+    """Run step2 for a single plan row. Updates state on completion."""
+    row = _load_plan_row(plan, row_idx)
+    group = row["group"]
+    genome = row["genome"]
+    ref = Path(row["ref_path"])
+    task_id = f"step2:group:{group}:genome:{genome}"
+
+    # Resume: skip if all steps already done
+    if resume:
+        for t in iter_tasks(state_obj):
+            if t.get("id") == task_id:
+                steps = t.get("steps", {})
+                if steps and all(v.get("status") == "done" for v in steps.values()):
+                    console.print(f"[dim]Skipping (done)[/] {task_id}")
+                    return
+                break
+
+    # Match FASTQs for this group
+    grp_r1 = [f for f in r1_fqs if group in f.name]
+    grp_r3 = [f for f in r3_fqs if group in f.name]
+    fq_r1 = grp_r1[0] if grp_r1 else r1_fqs[0]
+    fq_r3 = grp_r3[0] if grp_r3 else r3_fqs[0]
+
+    console.print(
+        f"[bold]Running[/] step2 row={row_idx} group={group} genome={genome} threads={threads}"
+    )
+
+    run_step2_for_sample_genome(
+        sample_id=group,
+        genome_target=genome,
+        fq_r1=fq_r1,
+        fq_r3=fq_r3,
+        ref_path=ref,
+        out_root=outdir,
+        whitelist_10x=whitelist_10x,
+        whitelist_tn5=whitelist_tn5,
+        threads=threads,
+        mapq_min=mapq_min,
+        dry_run=dry_run,
+    )
+
+    # Mark all sub-steps done in state
+    for t in iter_tasks(state_obj):
+        if t.get("id") == task_id:
+            for step_key in t.get("steps", {}):
+                mark_task_step(state_obj, task_id, step_key, "done")
+            break
+    save_state(state_obj, state_path)
+    console.print(f"[green]Completed[/] {task_id}")
+
+
 @step2_app.command("run")
 def step2_run(
     mode: str = typer.Option("local", help="local|hpc"),
@@ -500,15 +605,41 @@ def step2_run(
         ),
     ),
     mapq_min: int = typer.Option(20, help="Minimum MAPQ to keep (default: 20)"),
+    plan: Optional[Path] = typer.Option(
+        None,
+        help="Path to run_plan.map.tsv (auto-discovered if omitted)",
+    ),
+    resume: bool = typer.Option(
+        False,
+        help="Skip tasks whose state steps are already all 'done'",
+    ),
 ):
     """
     Step 2 orchestrator: map + clean for pending tasks.
 
-    - Lists pending step2 mapping tasks from the state file.
-    - Optionally discovers input FASTQs produced by step1 for a given sample
-      when --from-step1-work-root is supplied.
-    - In execution mode (--dry-run False), runs mapping and cleaning for each task.
+    In LOCAL mode, loops through all plan rows sequentially.
+    In HPC mode, each SLURM array task processes a single row from the plan.
     """
+    setup_logging(1)
+
+    # -- Locate plan TSV -------------------------------------------------------
+    if plan is None:
+        for candidate in [Path("run_plan.map.tsv"), outdir / "run_plan.map.tsv"]:
+            if candidate.exists():
+                plan = candidate
+                break
+        if plan is None:
+            console.print(
+                "[red]Could not locate run_plan.map.tsv. "
+                "Run 'step2 plan' first or pass --plan.[/]"
+            )
+            raise typer.Exit(1)
+
+    total_rows = _count_plan_rows(plan)
+    threads = _resolve_threads_hpc(mode, threads_per_task)
+
+    # -- Discover FASTQs -------------------------------------------------------
+    fastqs: List[Path] = []
     if from_step1_work_root is not None:
         fastqs = _discover_step2_fastqs_from_step1(
             work_root=from_step1_work_root,
@@ -521,19 +652,20 @@ def step2_run(
         for fq in fastqs:
             console.print(f"  - {fq}")
 
-    s = ensure_state(state)
-    pending = [
-        t
-        for t in iter_tasks(s)
-        if t.get("kind") == "step2"
-        and t.get("steps", {}).get("map", {}).get("status") != "done"
-    ]
-    console.print(
-        f"[bold]Step 2[/] mode={mode} threads={threads_per_task} "
-        f"dry_run={dry_run} outdir={outdir} mapq_min={mapq_min}"
-    )
-    console.print(f"Pending mapping tasks: {len(pending)}")
+    # -- Dry-run: show pending tasks and exit ----------------------------------
     if dry_run:
+        s = ensure_state(state)
+        pending = [
+            t
+            for t in iter_tasks(s)
+            if t.get("kind") == "step2"
+            and t.get("steps", {}).get("map", {}).get("status") != "done"
+        ]
+        console.print(
+            f"[bold]Step 2[/] mode={mode} threads={threads} "
+            f"dry_run={dry_run} outdir={outdir} mapq_min={mapq_min}"
+        )
+        console.print(f"Plan rows: {total_rows}, Pending tasks: {len(pending)}")
         console.print("[yellow]Dry-run mode: showing first 10 pending tasks[/]")
         for t in pending[:10]:
             console.print(
@@ -542,52 +674,106 @@ def step2_run(
             )
         if len(pending) > 10:
             console.print(f" - ... and {len(pending) - 10} more tasks")
-        console.print("[yellow]Use --dry-run False to execute these tasks (once wired).[/]")
-    else:
-        whitelist_10x = resolve_whitelist(None)
-        whitelist_tn5 = resolve_tn5_bcs(None)
+        console.print("[yellow]Use --dry-run False to execute.[/]")
+        return
 
-        if from_step1_work_root is None:
-            console.print("[red]--from-step1-work-root is required for execution mode[/]")
-            raise typer.Exit(1)
+    # -- Execution: validate FASTQs --------------------------------------------
+    if from_step1_work_root is None:
+        console.print("[red]--from-step1-work-root is required for execution mode[/]")
+        raise typer.Exit(1)
 
-        r1_fqs = sorted(f for f in fastqs if "_R1" in f.name)
-        r3_fqs = sorted(f for f in fastqs if "_R3" in f.name)
-        if not r1_fqs or not r3_fqs:
-            console.print("[red]Could not find R1/R3 FASTQ pairs[/]")
-            raise typer.Exit(1)
+    whitelist_10x = resolve_whitelist(None)
+    whitelist_tn5 = resolve_tn5_bcs(None)
 
-        from scifi_demux.utils.state import mark_task_step
+    r1_fqs = sorted(f for f in fastqs if "_R1" in f.name)
+    r3_fqs = sorted(f for f in fastqs if "_R3" in f.name)
+    if not r1_fqs or not r3_fqs:
+        console.print("[red]Could not find R1/R3 FASTQ pairs[/]")
+        raise typer.Exit(1)
 
-        for t in pending:
-            group = t.get("group", "unknown")
-            genome = t.get("genome", "unknown")
-            ref = Path(t.get("params", {}).get("ref_path", ""))
+    s = ensure_state(state)
 
-            # Match FASTQs for this group (sample)
-            grp_r1 = [f for f in r1_fqs if group in f.name]
-            grp_r3 = [f for f in r3_fqs if group in f.name]
-            fq_r1 = grp_r1[0] if grp_r1 else r1_fqs[0]
-            fq_r3 = grp_r3[0] if grp_r3 else r3_fqs[0]
+    # -- Common kwargs for _run_step2_single_task ------------------------------
+    task_kw = dict(
+        plan=plan, r1_fqs=r1_fqs, r3_fqs=r3_fqs, outdir=outdir,
+        whitelist_10x=whitelist_10x, whitelist_tn5=whitelist_tn5,
+        threads=threads, mapq_min=mapq_min, state_obj=s,
+        state_path=state, resume=resume, dry_run=False,
+    )
 
-            console.print(f"[bold]Running[/] step2 for group={group} genome={genome}")
-            run_step2_for_sample_genome(
-                sample_id=group,
-                genome_target=genome,
-                fq_r1=fq_r1,
-                fq_r3=fq_r3,
-                ref_path=ref,
-                out_root=outdir,
-                whitelist_10x=whitelist_10x,
-                whitelist_tn5=whitelist_tn5,
-                threads=threads_per_task,
-                mapq_min=mapq_min,
-                dry_run=False,
+    # -- HPC dispatch ----------------------------------------------------------
+    if mode == "hpc":
+        array_id = _read_array_id_from_env()
+
+        if array_id is None:
+            console.print(
+                "[warn] No array env detected; running all plan rows serially."
             )
-            for step_key in t.get("steps", {}):
-                mark_task_step(s, t["id"], step_key, "done")
-            save_state(s, state)
-            console.print(f"[green]Completed[/] {t['id']}")
+            for row_idx in range(1, total_rows + 1):
+                _run_step2_single_task(row_idx=row_idx, **task_kw)
+            return
+
+        if 1 <= array_id <= total_rows:
+            _run_step2_single_task(row_idx=array_id, **task_kw)
+            return
+
+        raise typer.BadParameter(
+            f"Array index {array_id} out of range for plan rows={total_rows}. "
+            f"Submit as --array=1-{total_rows}."
+        )
+
+    # -- Local mode: run all rows serially -------------------------------------
+    console.print(
+        f"[bold]Step 2[/] mode={mode} threads={threads} "
+        f"outdir={outdir} mapq_min={mapq_min} rows={total_rows}"
+    )
+    for row_idx in range(1, total_rows + 1):
+        _run_step2_single_task(row_idx=row_idx, **task_kw)
+
+
+@step2_app.command("sbatch")
+def step2_sbatch(
+    plan: Path = typer.Option(..., exists=True, help="run_plan.map.tsv"),
+    sample: str = typer.Option(..., help="Sample/library name"),
+    from_step1_work_root: Path = typer.Option(..., exists=True, help="Step1 work root"),
+    outdir: Path = typer.Option(..., help="Output directory"),
+    cpus: int = typer.Option(24, help="CPUs per task"),
+    time: str = typer.Option("24:00:00", help="Wall time per task"),
+    mem: str = typer.Option("16G", help="Memory per task"),
+    partition: str = typer.Option("standard", help="SLURM partition"),
+    state: Path = typer.Option(STATE_PATH_DEFAULT),
+    mapq_min: int = typer.Option(20),
+    job_name: str = typer.Option("step2", help="SLURM job name"),
+):
+    """Generate a SLURM array submission script for step2."""
+    from scifi_demux.exec.hpc import render_sbatch
+
+    total_rows = _count_plan_rows(plan)
+    cmd = (
+        f"scifi-demux step2 run "
+        f"--mode hpc "
+        f"--sample {sample} "
+        f"--from-step1-work-root {from_step1_work_root.resolve()} "
+        f"--outdir {outdir.resolve()} "
+        f"--plan {plan.resolve()} "
+        f"--state {state} "
+        f"--threads-per-task {cpus} "
+        f"--mapq-min {mapq_min} "
+        f"--dry-run False "
+        f"--resume"
+    )
+    script_path = render_sbatch(
+        job_name=job_name,
+        out_dir=outdir / "slurm_logs",
+        array=f"1-{total_rows}",
+        cpus=cpus,
+        time=time,
+        mem=mem,
+        partition=partition,
+        cmd=cmd,
+    )
+    console.print(f"[bold green]Wrote[/] SLURM script: {script_path}")
+    console.print(f"Submit with: sbatch {script_path}")
 
 
 # ------------------------------------------------------------------------------------
