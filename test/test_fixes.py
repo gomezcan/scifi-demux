@@ -546,3 +546,60 @@ def test_scifi_cleanup_barcode_concatenation():
     # Guard: need at least 4 parts (READID + 10x + Tn5A + Tn5B)
     short_parts = "READID_ACGT".split("_")
     assert len(short_parts) < 4, "Short read name should be rejected by guard"
+
+
+# ---------------------------------------------------------------------------
+# Sentinel cleanup race: bam_sort only deleted after bc_tag completes
+# ---------------------------------------------------------------------------
+def test_step2_cleanup_deferred_until_bc_tag(tmp_path: Path):
+    """bam_sort must not be deleted if bc_tag fails; must be deleted once bc_tag succeeds."""
+    from scifi_demux.steps.step2 import run_scifi_cleaning_pipeline
+
+    bam_dir = tmp_path / "bam"
+    bed_dir = tmp_path / "bed"
+    sent_dir = tmp_path / "sent"
+    sent_dir.mkdir()
+    bam_raw = tmp_path / "raw.bam"
+    bam_raw.write_bytes(b"")
+    base = "S1_G1_scifiATAC"
+
+    # Run 1: bc_tag (scifi_cleanup_bam) raises → pipeline aborts mid-way
+    with (
+        patch("scifi_demux.steps.step2.subprocess.run") as mock_sub,
+        patch("scifi_demux.steps.step2.scifi_cleanup_bam", side_effect=RuntimeError("simulated bc_tag failure")),
+        patch("scifi_demux.steps.step2.process_and_count"),
+        patch("scifi_demux.steps.step2.legacy_script_path", return_value=Path("/fake/tn5.py")),
+    ):
+        with pytest.raises(RuntimeError, match="simulated bc_tag failure"):
+            run_scifi_cleaning_pipeline(
+                base=base, bam_raw=bam_raw,
+                out_bam_dir=bam_dir, out_bed_dir=bed_dir,
+                whitelist_10x=Path("/fake/wl10x"), whitelist_tn5=Path("/fake/wltn5"),
+                threads=1, mapq_min=20, dry_run=False, sent_dir=sent_dir,
+            )
+
+    # sort sentinel exists but bc_tag does not
+    assert (sent_dir / f"{base}.sort.ok.json").exists()
+    assert not (sent_dir / f"{base}.bc_tag.ok.json").exists()
+    # bam_sort must still exist (created by mocked subprocess, simulated here)
+    bam_sort = bam_dir / f"{base}.rawSort.bam"
+    bam_sort.write_bytes(b"fake sorted bam")  # simulate it existing from sort stage
+    assert bam_sort.exists()
+
+    # Run 2: all stages succeed (sort skipped via sentinel, bc_tag runs OK)
+    with (
+        patch("scifi_demux.steps.step2.subprocess.run"),
+        patch("scifi_demux.steps.step2.scifi_cleanup_bam"),
+        patch("scifi_demux.steps.step2.process_and_count"),
+        patch("scifi_demux.steps.step2.legacy_script_path", return_value=Path("/fake/tn5.py")),
+    ):
+        run_scifi_cleaning_pipeline(
+            base=base, bam_raw=bam_raw,
+            out_bam_dir=bam_dir, out_bed_dir=bed_dir,
+            whitelist_10x=Path("/fake/wl10x"), whitelist_tn5=Path("/fake/wltn5"),
+            threads=1, mapq_min=20, dry_run=False, sent_dir=sent_dir,
+        )
+
+    # Now bc_tag sentinel exists and bam_sort should be cleaned up
+    assert (sent_dir / f"{base}.bc_tag.ok.json").exists()
+    assert not bam_sort.exists(), "bam_sort should be deleted after bc_tag completes"

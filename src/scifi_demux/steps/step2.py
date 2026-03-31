@@ -380,7 +380,10 @@ def run_scifi_cleaning_pipeline(
         print(f"[step2] Skipping counts (sentinel exists): {base}")
 
     # 8) Optional cleanup of intermediates
-    if not dry_run and bam_sort.exists():
+    # Only delete bam_sort once bc_tag has completed (its sole consumer),
+    # so that a resume after bc_tag failure can still find the sorted BAM.
+    bc_tag_done = sent_dir is not None and has_ok(sent_dir / f"{base}.bc_tag")
+    if not dry_run and bc_tag_done and bam_sort.exists():
         bam_sort.unlink()
 
 
