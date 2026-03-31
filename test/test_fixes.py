@@ -609,14 +609,15 @@ def test_step2_cleanup_deferred_until_bc_tag(tmp_path: Path):
 # BWA read group (@RG) header
 # ---------------------------------------------------------------------------
 def test_step2_bwa_mem_includes_read_group(tmp_path: Path):
-    """run_bwa_mapping must pass -R with @RG header to bwa mem."""
+    """run_bwa_mapping must pass -R with @RG header to bwa mem as a list (no shell)."""
     from scifi_demux.steps.step2 import run_bwa_mapping
 
     out_dir = tmp_path / "bam"
     sent_dir = tmp_path / "sent"
     sent_dir.mkdir()
 
-    with patch("scifi_demux.steps.step2.subprocess.run") as mock_sub:
+    with patch("scifi_demux.steps.step2.subprocess.run") as mock_sub, \
+         patch("builtins.open", MagicMock()):
         run_bwa_mapping(
             sample_id="Pool1", genome_target="B73",
             fq_r1=Path("/fake/r1.fq"), fq_r3=Path("/fake/r3.fq"),
@@ -624,10 +625,14 @@ def test_step2_bwa_mem_includes_read_group(tmp_path: Path):
             threads=4, dry_run=False, sent_dir=sent_dir,
         )
 
-    # First subprocess call is bwa mem (via shell string)
+    # bwa mem is called as a list (not shell string) to preserve \t in @RG
     first_call = mock_sub.call_args_list[0]
-    cmd_str = first_call[0][0]  # positional arg to subprocess.run
-    assert "@RG" in cmd_str, f"bwa mem command missing @RG: {cmd_str}"
-    assert "ID:Pool1" in cmd_str
-    assert "SM:Pool1" in cmd_str
-    assert "PL:ILLUMINA" in cmd_str
+    cmd_list = first_call[0][0]  # positional arg to subprocess.run
+    assert isinstance(cmd_list, list), f"bwa mem should be called as list, got {type(cmd_list)}"
+    rg_arg = cmd_list[cmd_list.index("-R") + 1]
+    assert rg_arg.startswith("@RG\\tID:"), f"@RG arg malformed: {rg_arg}"
+    assert "ID:Pool1" in rg_arg
+    assert "SM:Pool1" in rg_arg
+    assert "PL:ILLUMINA" in rg_arg
+    # Verify stdout is redirected (not shell=True)
+    assert first_call[1].get("stdout") is not None, "bwa mem should use stdout redirect"

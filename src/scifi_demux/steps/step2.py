@@ -161,9 +161,11 @@ def run_bwa_mapping(
         str(fq_r1),
         str(fq_r3),
     ]
-    # bwa mem → SAM (shell redirection)
-    cmd_mem_shell = " ".join(str(x) for x in cmd_mem) + f" > {sam_path}"
-    _run(cmd_mem_shell, dry_run=dry_run)
+    # bwa mem → SAM (direct stdout redirect to preserve \t in @RG)
+    print(f"[step2] RUN: {' '.join(str(x) for x in cmd_mem)} > {sam_path}")
+    if not dry_run:
+        with open(sam_path, "w") as fh:
+            subprocess.run(cmd_mem, stdout=fh, check=True)
 
     # SAM → BAM
     cmd_view = [
