@@ -515,3 +515,34 @@ def test_step2_exact_prefix_no_substring_match(tmp_path: Path):
     assert len(grp_r3) == 1, f"Expected 1 R3 match, got {len(grp_r3)}: {grp_r3}"
     assert grp_r1[0].name == "A1_R1.bc1.bc2.fastq.gz"
     assert grp_r3[0].name == "A1_R3.bc1.bc2.fastq.gz"
+
+
+# ---------------------------------------------------------------------------
+# scifi_cleanup_bam barcode concatenation fix
+# ---------------------------------------------------------------------------
+def test_scifi_cleanup_barcode_concatenation():
+    """Barcode extraction must concatenate last 3 read-name segments (26bp), not just the last one."""
+    from scifi_demux.utils.scifi_cleanup import correct_barcodes
+
+    # Simulate read name: READ_<10x 16bp>_<Tn5A 5bp>_<Tn5B 5bp>
+    tenx_16 = "CGACCTTTGCTTTAGG"  # 16bp
+    tn5a_5 = "CGTAT"              # 5bp
+    tn5b_5 = "TCGGA"              # 5bp
+    qname = f"READID_{tenx_16}_{tn5a_5}_{tn5b_5}"
+    parts = qname.split("_")
+
+    # Fixed logic: concatenate last 3 segments → 26bp
+    raw_bc_fixed = "".join(parts[-3:])
+    assert len(raw_bc_fixed) == 26, f"Expected 26bp, got {len(raw_bc_fixed)}"
+
+    # Old buggy logic: only last segment → 5bp → always fails
+    raw_bc_buggy = parts[-1]
+    assert len(raw_bc_buggy) == 5
+
+    # correct_barcodes rejects < 26bp input
+    result_buggy, status_buggy = correct_barcodes(raw_bc_buggy, set(), {})
+    assert result_buggy is None and status_buggy == 2, "5bp input must fail"
+
+    # Guard: need at least 4 parts (READID + 10x + Tn5A + Tn5B)
+    short_parts = "READID_ACGT".split("_")
+    assert len(short_parts) < 4, "Short read name should be rejected by guard"

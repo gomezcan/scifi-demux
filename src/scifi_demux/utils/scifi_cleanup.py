@@ -234,10 +234,10 @@ def scifi_cleanup_bam(
             # 2. Extract Barcode from read name
             # Expect something like: READID_..._<BCSTRING>
             qname_parts = read.query_name.split("_")
-            if len(qname_parts) < 2:
+            if len(qname_parts) < 4:
                 continue
 
-            raw_bc_seq = qname_parts[-1]
+            raw_bc_seq = "".join(qname_parts[-3:])
 
             # 3. Correct barcodes
             corrected_bc, status = correct_barcodes(raw_bc_seq, tenx_wl, tn5_map)
