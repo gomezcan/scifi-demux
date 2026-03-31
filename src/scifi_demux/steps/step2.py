@@ -148,10 +148,13 @@ def run_bwa_mapping(
     )
 
     # Map to SAM
+    rg = f"@RG\\tID:{sample_id}\\tSM:{sample_id}\\tLB:{sample_id}\\tPL:ILLUMINA"
     cmd_mem = [
         "bwa",
         "mem",
         "-M",
+        "-R",
+        rg,
         "-t",
         str(threads),
         str(index_prefix),

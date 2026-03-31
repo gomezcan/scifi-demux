@@ -603,3 +603,31 @@ def test_step2_cleanup_deferred_until_bc_tag(tmp_path: Path):
     # Now bc_tag sentinel exists and bam_sort should be cleaned up
     assert (sent_dir / f"{base}.bc_tag.ok.json").exists()
     assert not bam_sort.exists(), "bam_sort should be deleted after bc_tag completes"
+
+
+# ---------------------------------------------------------------------------
+# BWA read group (@RG) header
+# ---------------------------------------------------------------------------
+def test_step2_bwa_mem_includes_read_group(tmp_path: Path):
+    """run_bwa_mapping must pass -R with @RG header to bwa mem."""
+    from scifi_demux.steps.step2 import run_bwa_mapping
+
+    out_dir = tmp_path / "bam"
+    sent_dir = tmp_path / "sent"
+    sent_dir.mkdir()
+
+    with patch("scifi_demux.steps.step2.subprocess.run") as mock_sub:
+        run_bwa_mapping(
+            sample_id="Pool1", genome_target="B73",
+            fq_r1=Path("/fake/r1.fq"), fq_r3=Path("/fake/r3.fq"),
+            index_prefix=Path("/fake/idx"), out_dir=out_dir,
+            threads=4, dry_run=False, sent_dir=sent_dir,
+        )
+
+    # First subprocess call is bwa mem (via shell string)
+    first_call = mock_sub.call_args_list[0]
+    cmd_str = first_call[0][0]  # positional arg to subprocess.run
+    assert "@RG" in cmd_str, f"bwa mem command missing @RG: {cmd_str}"
+    assert "ID:Pool1" in cmd_str
+    assert "SM:Pool1" in cmd_str
+    assert "PL:ILLUMINA" in cmd_str
