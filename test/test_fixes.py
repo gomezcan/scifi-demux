@@ -636,3 +636,30 @@ def test_step2_bwa_mem_includes_read_group(tmp_path: Path):
     assert "PL:ILLUMINA" in rg_arg
     # Verify stdout is redirected (not shell=True)
     assert first_call[1].get("stdout") is not None, "bwa mem should use stdout redirect"
+
+
+# ---------------------------------------------------------------------------
+# Tn5 1-mismatch map must not overwrite exact (identity) matches
+# ---------------------------------------------------------------------------
+def test_tn5_identity_preserved_after_mismatch_loop(tmp_path: Path):
+    """Valid Tn5 barcodes within 1-mismatch of each other must still map to themselves."""
+    from scifi_demux.utils.scifi_cleanup import load_whitelists
+
+    # Create minimal whitelists
+    tenx_path = tmp_path / "10x.txt"
+    tenx_path.write_text("AAAAAAAAAAAAAAAA\n")  # dummy 16bp
+
+    # ACTAA, ACTAC, AGTAA are all within 1-mismatch of each other
+    tn5_path = tmp_path / "tn5.txt"
+    tn5_path.write_text(
+        "scifiv2-A5\tACTAC\tA5\n"
+        "scifiv2-A6\tACTAA\tA6\n"
+        "scifiv2-A9\tAGTAA\tA9\n"
+    )
+
+    _, tn5_map = load_whitelists(tenx_path, tn5_path)
+
+    # All three valid sequences must map to themselves (identity)
+    assert tn5_map["ACTAC"] == "ACTAC", f"ACTAC mapped to {tn5_map['ACTAC']}"
+    assert tn5_map["ACTAA"] == "ACTAA", f"ACTAA mapped to {tn5_map['ACTAA']}"
+    assert tn5_map["AGTAA"] == "AGTAA", f"AGTAA mapped to {tn5_map['AGTAA']}"

@@ -118,6 +118,11 @@ def load_whitelists(tenx_path: Path, tn5_path: Path) -> Tuple[Set[str], Dict[str
                     if tn5_map[mutant] is not None and tn5_map[mutant] != valid_seq:
                         tn5_map[mutant] = None
 
+    # Restore identity: valid sequences always map to themselves,
+    # even if a 1-mismatch mutant of another valid sequence overwrote them.
+    for valid_seq in valid_tn5:
+        tn5_map[valid_seq] = valid_seq
+
     return tenx_wl, tn5_map
 
 
