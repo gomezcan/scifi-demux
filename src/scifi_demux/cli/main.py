@@ -560,8 +560,15 @@ def _run_step2_single_task(
     # Match FASTQs for this group (exact prefix to avoid A1 matching A10)
     grp_r1 = [f for f in r1_fqs if f.name.startswith(f"{group}_")]
     grp_r3 = [f for f in r3_fqs if f.name.startswith(f"{group}_")]
-    fq_r1 = grp_r1[0] if grp_r1 else r1_fqs[0]
-    fq_r3 = grp_r3[0] if grp_r3 else r3_fqs[0]
+    if not grp_r1 or not grp_r3:
+        raise FileNotFoundError(
+            f"No FASTQs found for group '{group}' in discovered FASTQs. "
+            f"Available R1: {[f.name for f in r1_fqs]}, "
+            f"Available R3: {[f.name for f in r3_fqs]}. "
+            f"Ensure the correct --from-step1-work-root is provided."
+        )
+    fq_r1 = grp_r1[0]
+    fq_r3 = grp_r3[0]
 
     console.print(
         f"[bold]Running[/] step2 row={row_idx} group={group} genome={genome} threads={threads}"
