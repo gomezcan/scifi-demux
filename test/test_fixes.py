@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import gzip
 import logging
+import subprocess
+import sys
 import warnings
 from pathlib import Path
 from unittest.mock import patch, MagicMock
@@ -663,3 +665,59 @@ def test_tn5_identity_preserved_after_mismatch_loop(tmp_path: Path):
     assert tn5_map["ACTAC"] == "ACTAC", f"ACTAC mapped to {tn5_map['ACTAC']}"
     assert tn5_map["ACTAA"] == "ACTAA", f"ACTAA mapped to {tn5_map['ACTAA']}"
     assert tn5_map["AGTAA"] == "AGTAA", f"AGTAA mapped to {tn5_map['AGTAA']}"
+
+
+# ---------------------------------------------------------------------------
+# 1_6_scifi_makeTn5bed.py --region restricts iteration to one chromosome
+# ---------------------------------------------------------------------------
+def test_makeTn5bed_region_filters_to_chromosome(tmp_path: Path):
+    """Legacy Tn5 BED script with --region <chr> emits only that chromosome's records."""
+    import pysam
+    from scifi_demux.io_utils import legacy_script_path
+
+    # Build a 2-chrom indexed BAM: 2 reads on chr1, 1 read on chr2
+    bam_path = tmp_path / "tiny.bam"
+    header = {
+        "HD": {"VN": "1.6", "SO": "coordinate"},
+        "SQ": [{"LN": 1000, "SN": "chr1"}, {"LN": 1000, "SN": "chr2"}],
+    }
+    with pysam.AlignmentFile(str(bam_path), "wb", header=header) as bam:
+        for i, (tid, pos) in enumerate([(0, 100), (0, 200), (1, 150)]):
+            a = pysam.AlignedSegment()
+            a.query_name = f"r{i}"
+            a.query_sequence = "ACGT"
+            a.flag = 0  # mapped, forward strand
+            a.reference_id = tid
+            a.reference_start = pos
+            a.mapping_quality = 60
+            a.cigarstring = "4M"
+            a.query_qualities = pysam.qualitystring_to_array("IIII")
+            a.set_tag("BC", f"BC{i}")
+            bam.write(a)
+    pysam.index(str(bam_path))
+
+    s_tn5 = legacy_script_path("1_6_scifi_makeTn5bed.py")
+
+    # Without --region: all 3 records
+    full = subprocess.run(
+        [sys.executable, str(s_tn5), str(bam_path)],
+        check=True, capture_output=True, text=True,
+    ).stdout.strip().splitlines()
+    assert len(full) == 3, f"expected 3 records (all chroms), got {len(full)}"
+
+    # With --region chr1: only the 2 chr1 records
+    chr1 = subprocess.run(
+        [sys.executable, str(s_tn5), str(bam_path), "--region", "chr1"],
+        check=True, capture_output=True, text=True,
+    ).stdout.strip().splitlines()
+    assert len(chr1) == 2, f"expected 2 chr1 records, got {len(chr1)}"
+    assert all(line.startswith("chr1\t") for line in chr1), \
+        f"non-chr1 records leaked: {chr1}"
+
+    # With --region chr2: only the 1 chr2 record
+    chr2 = subprocess.run(
+        [sys.executable, str(s_tn5), str(bam_path), "--region", "chr2"],
+        check=True, capture_output=True, text=True,
+    ).stdout.strip().splitlines()
+    assert len(chr2) == 1
+    assert chr2[0].startswith("chr2\t")

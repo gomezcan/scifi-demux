@@ -14,7 +14,9 @@ Step 2 core:
 from __future__ import annotations
 from pathlib import Path
 from typing import List
+import shutil
 import subprocess
+from concurrent.futures import ThreadPoolExecutor
 
 
 from scifi_demux.io_utils import legacy_script_path
@@ -218,7 +220,7 @@ def run_scifi_cleaning_pipeline(
     Subsequent stages:
       - Picard MarkDuplicates (BARCODE_TAG=BC)
       - scifi_fixBC.process_and_count (multi-mapping + BC fix; writes *_rmdup.mm.bam + *_bc_counts.txt)
-      - 1_6_scifi_makeTn5bed.py → BED → sort/uniq → pigz
+      - 1_6_scifi_makeTn5bed.py → BED (per-chromosome fan-out, threads-per-task workers) → pigz
       - per-BAM read counts and optional cleanup
     """
     out_bam_dir.mkdir(parents=True, exist_ok=True)
@@ -334,16 +336,60 @@ def run_scifi_cleaning_pipeline(
     else:
         print(f"[step2] Skipping index_bam (sentinel exists): {base}")
 
-    # 6) Make Tn5 BED and compress
+    # 6) Make Tn5 BED and compress (per-chromosome fan-out)
+    # Splits the work across chromosomes from `samtools idxstats`, runs each
+    # `python | sort | uniq` pipeline in parallel up to `threads_str` workers,
+    # then concatenates per-chrom files in lex order. Output is byte-identical
+    # to the previous single-shot `python | sort -k1,1 -k2,2n | uniq` pipeline
+    # (cross-chrom dupes can't exist; per-chrom uniq + lex concat == global).
     bed_path = out_bed_dir / f"{base}.mq{mapq_min}.tn5.bed"
     if sent_dir is None or not has_ok(sent_dir / f"{base}.tn5bed"):
-        cmd_tn5 = (
-            f"python {s_tn5_bed} {bam_mm} "
-            f"| sort -k1,1 -k2,2n "
-            f"| uniq "
-            f"> {bed_path}"
+        idx_proc = subprocess.run(
+            ["samtools", "idxstats", str(bam_mm)],
+            check=True, capture_output=True, text=True,
         )
-        _run(cmd_tn5, dry_run=dry_run)
+        chroms: list[str] = []
+        for line in idx_proc.stdout.splitlines():
+            parts = line.split("\t")
+            if len(parts) >= 3 and parts[0] != "*":
+                try:
+                    if int(parts[2]) > 0:
+                        chroms.append(parts[0])
+                except ValueError:
+                    continue
+        chroms.sort()  # lex order matches original `sort -k1,1` cross-chrom ordering
+
+        chr_tmp_dir = out_bed_dir / f".{base}.tn5bed.chr_tmp"
+        if chr_tmp_dir.exists():
+            shutil.rmtree(chr_tmp_dir)
+        chr_tmp_dir.mkdir(parents=True, exist_ok=True)
+
+        def _bed_for_chr(chrom: str) -> Path:
+            chr_bed = chr_tmp_dir / f"{chrom}.bed"
+            cmd = (
+                f"python {s_tn5_bed} {bam_mm} --region {chrom} "
+                f"| sort -k2,2n "
+                f"| uniq "
+                f"> {chr_bed}"
+            )
+            _run(cmd, dry_run=dry_run)
+            return chr_bed
+
+        if chroms:
+            max_workers = max(1, min(int(threads_str), len(chroms)))
+            with ThreadPoolExecutor(max_workers=max_workers) as pool:
+                chr_beds = list(pool.map(_bed_for_chr, chroms))
+        else:
+            chr_beds = []
+
+        if not dry_run:
+            with open(bed_path, "wb") as out:
+                for chr_bed in chr_beds:
+                    if chr_bed.exists():
+                        with open(chr_bed, "rb") as src:
+                            for chunk in iter(lambda: src.read(1 << 20), b""):
+                                out.write(chunk)
+            shutil.rmtree(chr_tmp_dir, ignore_errors=True)
 
         cmd_gzip = [
             "pigz",
