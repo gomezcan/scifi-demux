@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "scifi-demux"
-version = "0.1.2"  # bump so pip doesn't reuse a cached wheel
+version = "0.1.3"  # bump so pip doesn't reuse a cached wheel
 description = "Wraps renaming, demultiplexing, mapping, and cleanup scripts for scifi-ATAC FASTQ workflows"
 readme = "README.md"
 authors = [{ name = "Fabio Gomez", email = "gomezcan@umich.edu" }]

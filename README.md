@@ -242,6 +242,33 @@ scifi-demux step2 run --mode hpc \
   --outdir 3_Mapping \
   --plan run_plan.map.tsv \
   --threads-per-task 24 \
+  --picard-max-heap 8g \
+  --dry-run False \
+  --resume
+```
+
+### Picard MarkDuplicates heap (`--picard-max-heap`)
+
+`scifi-demux` passes the JVM max heap to Picard MarkDuplicates as a CLI arg,
+not via `JAVA_TOOL_OPTIONS`. This is intentional: the bioconda `picard`
+wrapper hard-codes `-Xms512m -Xmx2g` and applies it on the final `java`
+command line **after** any env-var-supplied JVM args, so a heap set via
+`JAVA_TOOL_OPTIONS=-Xmx…` is silently overridden (last `-Xmx` wins). Passing
+it as a leading picard arg short-circuits the wrapper's default.
+
+Default `--picard-max-heap 8g` is enough for typical scifi-ATAC pools. Bump
+for heavy multi-genome workloads (e.g. dense pools or NAM-style genotyping
+runs with many reference targets), and remember to size SLURM `--mem`
+accordingly (heap + ~16–32 GiB JVM overhead headroom):
+
+```bash
+scifi-demux step2 run --mode hpc \
+  --sample SampleExample1 \
+  --from-step1-work-root SampleExample1_work \
+  --outdir 3_Mapping \
+  --plan run_plan.map.tsv \
+  --threads-per-task 30 \
+  --picard-max-heap 96g \
   --dry-run False \
   --resume
 ```
