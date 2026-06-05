@@ -207,6 +207,7 @@ def run_scifi_cleaning_pipeline(
     mapq_min: int = 20,
     dry_run: bool = False,
     sent_dir: Path | None = None,
+    picard_max_heap: str = "8g",
 ) -> None:
     """
     Run the scifi-ATAC cleaning pipeline for a given base name and raw BAM.
@@ -277,8 +278,18 @@ def run_scifi_cleaning_pipeline(
     bam_rmdup = out_bam_dir / f"{base}.mq{mapq_min}.BC.rmdup.bam"
     metrics = out_bam_dir / f"{base}.metrics"
     if sent_dir is None or not has_ok(sent_dir / f"{base}.dedup"):
+        # NOTE: -Xmx must be passed as a picard CLI arg (NOT via JAVA_TOOL_OPTIONS).
+        # The bioconda picard wrapper hard-codes `default_jvm_mem_opts="-Xms512m -Xmx2g"`
+        # and applies it on the final `java` command line AFTER env-var-supplied
+        # JVM args, so any -Xmx coming from JAVA_TOOL_OPTIONS is silently overridden
+        # (last -Xmx wins). The wrapper's case statement routes a leading -Xm* arg
+        # into jvm_mem_opts, which short-circuits the default — so this is the only
+        # path that reliably sets the heap. See bioconda picard wrapper
+        # (default_jvm_mem_opts + the `if [ "$jvm_mem_opts" == "" ] && [ -z ${_JAVA_OPTIONS+x} ]`
+        # block) for the wrapper-side logic.
         cmd_picard = [
             "picard",
+            f"-Xmx{picard_max_heap}",
             "MarkDuplicates",
             f"I={bam_bc}",
             f"O={bam_rmdup}",
@@ -454,6 +465,7 @@ def run_step2_for_sample_genome(
     threads: int = 8,
     mapq_min: int = 20,
     dry_run: bool = False,
+    picard_max_heap: str = "8g",
 ) -> None:
     """
     High-level entry point for one (sample, genome) pair.
@@ -513,4 +525,5 @@ def run_step2_for_sample_genome(
         mapq_min=mapq_min,
         dry_run=dry_run,
         sent_dir=sent_dir,
+        picard_max_heap=picard_max_heap,
     )

@@ -539,6 +539,7 @@ def _run_step2_single_task(
     state_path: Path,
     resume: bool,
     dry_run: bool,
+    picard_max_heap: str = "8g",
 ) -> None:
     """Run step2 for a single plan row. Updates state on completion."""
     row = _load_plan_row(plan, row_idx)
@@ -586,6 +587,7 @@ def _run_step2_single_task(
         threads=threads,
         mapq_min=mapq_min,
         dry_run=dry_run,
+        picard_max_heap=picard_max_heap,
     )
 
     # Mark all sub-steps done in state
@@ -618,6 +620,15 @@ def step2_run(
         ),
     ),
     mapq_min: int = typer.Option(20, help="Minimum MAPQ to keep (default: 20)"),
+    picard_max_heap: str = typer.Option(
+        "8g",
+        help=(
+            "JVM max heap for Picard MarkDuplicates, e.g. '8g', '32g', '96g'. "
+            "Passed as a CLI arg (NOT JAVA_TOOL_OPTIONS) so the bioconda picard "
+            "wrapper's hard-coded default of -Xmx2g is correctly overridden. "
+            "Bump for large pools / multi-genome scifi runs (default: 8g)."
+        ),
+    ),
     plan: Optional[Path] = typer.Option(
         None,
         help="Path to run_plan.map.tsv (auto-discovered if omitted)",
@@ -712,6 +723,7 @@ def step2_run(
         whitelist_10x=whitelist_10x, whitelist_tn5=whitelist_tn5,
         threads=threads, mapq_min=mapq_min, state_obj=s,
         state_path=state, resume=resume, dry_run=False,
+        picard_max_heap=picard_max_heap,
     )
 
     # -- HPC dispatch ----------------------------------------------------------
@@ -756,6 +768,10 @@ def step2_sbatch(
     partition: str = typer.Option("standard", help="SLURM partition"),
     state: Path = typer.Option(STATE_PATH_DEFAULT),
     mapq_min: int = typer.Option(20),
+    picard_max_heap: str = typer.Option(
+        "8g",
+        help="JVM max heap for Picard MarkDuplicates (default: 8g). Bump for large pools.",
+    ),
     job_name: str = typer.Option("step2", help="SLURM job name"),
 ):
     """Generate a SLURM array submission script for step2."""
@@ -772,6 +788,7 @@ def step2_sbatch(
         f"--state {state} "
         f"--threads-per-task {cpus} "
         f"--mapq-min {mapq_min} "
+        f"--picard-max-heap {picard_max_heap} "
         f"--dry-run False "
         f"--resume"
     )
