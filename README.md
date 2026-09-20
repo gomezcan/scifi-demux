@@ -20,7 +20,16 @@ It wraps existing bioinformatics tools in a reproducible, resumable, QC-aware fr
 - Supports **design files** (for pooling/grouping) or defaults to per-well demux
 - Generates built-in **QC summaries** and integrates with **MultiQC**
 
+## Citation
 
+If you use `scifi-demux`, please cite:
+
+> Gomez-Cano F, Jiang L, Welch JD, Marand AP. Empirical Estimation of Ambient Contamination in
+> Combinatorial Single-Cell Methods Using Multi-Reference Mapping. bioRxiv (2026).
+> https://doi.org/10.64898/2026.09.11.750809
+
+The preprint cites version 0.1.3. The scripts and run configurations behind its figures are in
+[ambientmapper_manuscript](https://github.com/gomezcan/ambientmapper_manuscript).
 
 ## Installation
 
