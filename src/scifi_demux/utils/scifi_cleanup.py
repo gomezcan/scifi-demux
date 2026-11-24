@@ -18,6 +18,14 @@ def reverse_complement(seq: str) -> str:
     """Fast reverse complement of a DNA sequence."""
     return seq.translate(DNA_COMPLEMENT)[::-1]
 
+
+# Orientation of the 10x barcode in the read names relative to the whitelist. Illumina i5 index
+# reads are the reverse complement of 737K-cratac-v1 ("revcomp", the legacy behaviour); Element
+# AVITI index reads are in whitelist orientation ("forward"). "auto" tests both on the first reads.
+TENX_ORIENTATIONS = ("auto", "forward", "revcomp")
+AUTO_ORIENT_READS = 100_000   # reads sampled by detect_tenx_orientation
+AUTO_ORIENT_MIN = 0.5         # exact-match fraction the better orientation must reach
+
 # --------------------------------------------------------------------
 # 10x correction: allow 1 mismatch (unique hit)
 # --------------------------------------------------------------------
@@ -134,6 +142,7 @@ def correct_barcodes(
     raw_bc: str,
     tenx_wl: Set[str],
     tn5_map: Dict[str, Optional[str]],
+    tenx_revcomp: bool = True,
 ) -> Tuple[Optional[str], int]:
     """
     Parse and correct scifi-ATAC barcodes.
@@ -141,7 +150,8 @@ def correct_barcodes(
     Input:
       raw_bc: string containing concatenated 10x + Tn5A + Tn5B segments.
               Assumed layout (26 bp total):
-                0–15  : 10x (will be reverse-complemented)
+                0–15  : 10x (reverse-complemented before the whitelist lookup when
+                        tenx_revcomp is True; see detect_tenx_orientation)
                 16–20 : Tn5A
                 21–25 : Tn5B
 
@@ -161,11 +171,12 @@ def correct_barcodes(
     raw_tn5_a = raw_bc[16:21]
     raw_tn5_b = raw_bc[21:26]
 
-    # Reverse complement the 10x portion (legacy behavior)
-    seq_10x_rc = reverse_complement(raw_10x)
+    # Illumina i5 index reads are the reverse complement of the whitelist (legacy behaviour);
+    # AVITI Index 1 reads are already in whitelist orientation.
+    seq_10x = reverse_complement(raw_10x) if tenx_revcomp else raw_10x
 
     # 1. Correct 10x (exact + 1-mismatch, unique)
-    corrected_10x, status_10x = correct_10x_one_mismatch(seq_10x_rc, tenx_wl)
+    corrected_10x, status_10x = correct_10x_one_mismatch(seq_10x, tenx_wl)
     if corrected_10x is None:
         return None, 2
 
@@ -187,6 +198,57 @@ def correct_barcodes(
     return final_bc, status
 
 
+def _raw_tenx_from_qname(qname: str) -> Optional[str]:
+    """16 bp 10x segment of a '<id>_<10x>_<Tn5A>_<Tn5B>' read name, or None."""
+    parts = qname.split("_")
+    if len(parts) < 4 or len(parts[-3]) != 16:
+        return None
+    return parts[-3]
+
+
+def detect_tenx_orientation(
+    input_bam: Path,
+    tenx_wl: Set[str],
+    n_reads: int = AUTO_ORIENT_READS,
+    min_match: float = AUTO_ORIENT_MIN,
+) -> str:
+    """
+    Decide whether the 10x barcodes in the read names must be reverse-complemented to match
+    the whitelist. Samples the first n_reads reads with a parseable barcode and counts exact
+    whitelist hits as-is and reverse-complemented. Returns "forward" or "revcomp".
+
+    Raises RuntimeError when the better orientation matches fewer than min_match of the reads,
+    so that a wrong whitelist or malformed names fail loudly instead of silently emptying the BAM.
+    """
+    n = fwd = rc = 0
+    with pysam.AlignmentFile(str(input_bam), "rb") as fh:
+        for read in fh:
+            raw = _raw_tenx_from_qname(read.query_name)
+            if raw is None:
+                continue
+            n += 1
+            fwd += raw in tenx_wl
+            rc += reverse_complement(raw) in tenx_wl
+            if n >= n_reads:
+                break
+    if n == 0:
+        raise RuntimeError(f"[orientation] no read name with a 16 bp 10x segment in {input_bam}")
+    f_fwd, f_rc = fwd / n, rc / n
+    orientation = "forward" if f_fwd >= f_rc else "revcomp"
+    print(
+        f"[INFO] 10x orientation: {orientation} (exact whitelist match on {n} reads: "
+        f"forward {f_fwd:.1%}, reverse-complement {f_rc:.1%})",
+        file=sys.stderr,
+    )
+    if max(f_fwd, f_rc) < min_match:
+        raise RuntimeError(
+            f"[orientation] 10x barcodes match the whitelist in neither orientation "
+            f"(forward {f_fwd:.1%}, reverse-complement {f_rc:.1%} of {n} reads). "
+            f"Check the whitelist and the read names, or force --tenx-orientation."
+        )
+    return orientation
+
+
 # --------------------------------------------------------------------
 # Core cleanup function
 # --------------------------------------------------------------------
@@ -198,6 +260,7 @@ def scifi_cleanup_bam(
     whitelist_tn5: Path,
     min_mapq: int = 20,
     threads: int = 4,
+    tenx_orientation: str = "auto",
 ) -> Tuple[int, int, int]:
     """
     Scifi-ATAC pre-dedup cleaning step:
@@ -207,14 +270,23 @@ def scifi_cleanup_bam(
           * mapping_quality >= min_mapq
           * proper pair (FLAG 0x2)
       - Extract concatenated BC from read name suffix
-      - Validate 10x part (exact), and 1-mismatch-correct Tn5 parts
+      - Validate 10x part (exact or unique 1-mismatch, in the orientation given by
+        tenx_orientation: 'revcomp' = Illumina i5 index read (legacy), 'forward' = AVITI
+        Index 1, 'auto' = detect from the first reads), and 1-mismatch-correct Tn5 parts
       - Attach corrected BC as 'BC' tag
       - Write passing reads to output BAM
 
     Returns:
       (total_reads, pass_mapq, pass_bc)
     """
+    if tenx_orientation not in TENX_ORIENTATIONS:
+        raise ValueError(f"tenx_orientation must be one of {TENX_ORIENTATIONS}, got {tenx_orientation!r}")
     tenx_wl, tn5_map = load_whitelists(whitelist_10x, whitelist_tn5)
+    if tenx_orientation == "auto":
+        tenx_orientation = detect_tenx_orientation(input_bam, tenx_wl)
+    else:
+        print(f"[INFO] 10x orientation: {tenx_orientation} (forced)", file=sys.stderr)
+    tenx_revcomp = tenx_orientation == "revcomp"
 
     count_total = 0
     count_pass_mq = 0
@@ -245,7 +317,7 @@ def scifi_cleanup_bam(
             raw_bc_seq = "".join(qname_parts[-3:])
 
             # 3. Correct barcodes
-            corrected_bc, status = correct_barcodes(raw_bc_seq, tenx_wl, tn5_map)
+            corrected_bc, status = correct_barcodes(raw_bc_seq, tenx_wl, tn5_map, tenx_revcomp=tenx_revcomp)
             if not corrected_bc:
                 continue
 
@@ -263,7 +335,13 @@ def scifi_cleanup_bam(
     print(f"[INFO] Complete.", file=sys.stderr)
     print(f"  Total Reads:           {count_total}", file=sys.stderr)
     print(f"  Passed MapQ/Flags:     {count_pass_mq}", file=sys.stderr)
-    print(f"  Passed BC Correction:  {count_pass_bc}", file=sys.stderr)
+    print(f"  Passed BC Correction:  {count_pass_bc}  (10x orientation: {tenx_orientation})", file=sys.stderr)
+    if count_pass_mq and count_pass_bc < 0.2 * count_pass_mq:
+        print(
+            f"[WARNING] only {count_pass_bc / count_pass_mq:.1%} of the MAPQ-passing reads carry a valid "
+            f"barcode; check the whitelist and --tenx-orientation",
+            file=sys.stderr,
+        )
 
     return count_total, count_pass_mq, count_pass_bc
 
@@ -280,6 +358,10 @@ def main(argv: Optional[list[str]] = None) -> None:
     parser.add_argument("--whitelist-tn5", required=True, type=Path)
     parser.add_argument("--min-mapq", type=int, default=20)
     parser.add_argument("--threads", type=int, default=4)
+    parser.add_argument(
+        "--tenx-orientation", choices=TENX_ORIENTATIONS, default="auto",
+        help="10x barcode orientation vs the whitelist: auto (detect), forward (AVITI), revcomp (Illumina i5)",
+    )
 
     args = parser.parse_args(argv)
 
@@ -290,6 +372,7 @@ def main(argv: Optional[list[str]] = None) -> None:
         whitelist_tn5=args.whitelist_tn5,
         min_mapq=args.min_mapq,
         threads=args.threads,
+        tenx_orientation=args.tenx_orientation,
     )
 
 

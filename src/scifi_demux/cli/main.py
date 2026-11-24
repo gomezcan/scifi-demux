@@ -540,6 +540,7 @@ def _run_step2_single_task(
     resume: bool,
     dry_run: bool,
     picard_max_heap: str = "8g",
+    tenx_orientation: str = "auto",
 ) -> None:
     """Run step2 for a single plan row. Updates state on completion."""
     row = _load_plan_row(plan, row_idx)
@@ -588,6 +589,7 @@ def _run_step2_single_task(
         mapq_min=mapq_min,
         dry_run=dry_run,
         picard_max_heap=picard_max_heap,
+        tenx_orientation=tenx_orientation,
     )
 
     # Mark all sub-steps done in state
@@ -637,6 +639,15 @@ def step2_run(
         False,
         help="Skip tasks whose state steps are already all 'done'",
     ),
+    tenx_orientation: str = typer.Option(
+        "auto",
+        help=(
+            "Orientation of the 10x barcode in the read names relative to the whitelist: "
+            "'revcomp' (Illumina i5 index reads, the legacy behaviour), 'forward' (e.g. Element "
+            "AVITI Index 1), or 'auto' (test both on the first 100k reads of each BAM, log the "
+            "match rates, abort if neither matches)."
+        ),
+    ),
 ):
     """
     Step 2 orchestrator: map + clean for pending tasks.
@@ -645,6 +656,9 @@ def step2_run(
     In HPC mode, each SLURM array task processes a single row from the plan.
     """
     setup_logging(1)
+
+    if tenx_orientation not in ("auto", "forward", "revcomp"):
+        raise typer.BadParameter("--tenx-orientation must be auto, forward or revcomp")
 
     # -- Locate plan TSV -------------------------------------------------------
     if plan is None:
@@ -687,7 +701,8 @@ def step2_run(
         ]
         console.print(
             f"[bold]Step 2[/] mode={mode} threads={threads} "
-            f"dry_run={dry_run} outdir={outdir} mapq_min={mapq_min}"
+            f"dry_run={dry_run} outdir={outdir} mapq_min={mapq_min} "
+            f"tenx_orientation={tenx_orientation}"
         )
         console.print(f"Plan rows: {total_rows}, Pending tasks: {len(pending)}")
         console.print("[yellow]Dry-run mode: showing first 10 pending tasks[/]")
@@ -723,7 +738,7 @@ def step2_run(
         whitelist_10x=whitelist_10x, whitelist_tn5=whitelist_tn5,
         threads=threads, mapq_min=mapq_min, state_obj=s,
         state_path=state, resume=resume, dry_run=False,
-        picard_max_heap=picard_max_heap,
+        picard_max_heap=picard_max_heap, tenx_orientation=tenx_orientation,
     )
 
     # -- HPC dispatch ----------------------------------------------------------
@@ -773,6 +788,9 @@ def step2_sbatch(
         help="JVM max heap for Picard MarkDuplicates (default: 8g). Bump for large pools.",
     ),
     job_name: str = typer.Option("step2", help="SLURM job name"),
+    tenx_orientation: str = typer.Option(
+        "auto", help="10x barcode orientation vs the whitelist: auto | forward | revcomp"
+    ),
 ):
     """Generate a SLURM array submission script for step2."""
     from scifi_demux.exec.hpc import render_sbatch
@@ -789,7 +807,8 @@ def step2_sbatch(
         f"--threads-per-task {cpus} "
         f"--mapq-min {mapq_min} "
         f"--picard-max-heap {picard_max_heap} "
-        f"--dry-run False "
+        f"--tenx-orientation {tenx_orientation} "
+        f"--no-dry-run "
         f"--resume"
     )
     script_path = render_sbatch(

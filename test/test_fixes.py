@@ -551,6 +551,106 @@ def test_scifi_cleanup_barcode_concatenation():
 
 
 # ---------------------------------------------------------------------------
+# 10x barcode orientation: Illumina i5 reads are reverse-complemented vs the
+# whitelist (legacy), AVITI Index 1 reads are forward; 'auto' must tell them apart
+# ---------------------------------------------------------------------------
+def _write_name_only_bam(path: Path, names: list, flag: int = 0) -> None:
+    """Tiny coordinate-sorted BAM whose only content of interest is the read names."""
+    import pysam
+
+    header = {"HD": {"VN": "1.6", "SO": "coordinate"}, "SQ": [{"LN": 1000, "SN": "chr1"}]}
+    with pysam.AlignmentFile(str(path), "wb", header=header) as bam:
+        for name in names:
+            a = pysam.AlignedSegment()
+            a.query_name = name
+            a.query_sequence = "ACGT"
+            a.flag = flag
+            a.reference_id = 0
+            a.reference_start = 100
+            a.mapping_quality = 60
+            a.cigarstring = "4M"
+            a.query_qualities = pysam.qualitystring_to_array("IIII")
+            bam.write(a)
+
+
+def test_correct_barcodes_orientation():
+    from scifi_demux.utils.scifi_cleanup import correct_barcodes, reverse_complement
+
+    wl_seq = "CGACCTTTGCTTTAGG"
+    tn5_map = {"CGTAT": "CGTAT", "TCGGA": "TCGGA"}
+    forward_bc = wl_seq + "CGTATTCGGA"
+    revcomp_bc = reverse_complement(wl_seq) + "CGTATTCGGA"
+
+    # legacy default: the 10x segment is reverse-complemented before the whitelist lookup
+    assert correct_barcodes(revcomp_bc, {wl_seq}, tn5_map) == (forward_bc, 0)
+    assert correct_barcodes(forward_bc, {wl_seq}, tn5_map)[0] is None
+    # forward: used as-is
+    assert correct_barcodes(forward_bc, {wl_seq}, tn5_map, tenx_revcomp=False) == (forward_bc, 0)
+    assert correct_barcodes(revcomp_bc, {wl_seq}, tn5_map, tenx_revcomp=False)[0] is None
+
+
+def test_detect_tenx_orientation(tmp_path: Path):
+    from scifi_demux.utils.scifi_cleanup import detect_tenx_orientation, reverse_complement
+
+    wl = {"CGACCTTTGCTTTAGG", "AAACCCGGGTTTACGT"}
+    seqs = sorted(wl) * 5
+    fwd_bam = tmp_path / "fwd.bam"
+    _write_name_only_bam(fwd_bam, [f"r{i}_{s}_CGTAT_TCGGA" for i, s in enumerate(seqs)])
+    assert detect_tenx_orientation(fwd_bam, wl) == "forward"
+
+    rc_bam = tmp_path / "rc.bam"
+    _write_name_only_bam(rc_bam, [f"r{i}_{reverse_complement(s)}_CGTAT_TCGGA" for i, s in enumerate(seqs)])
+    assert detect_tenx_orientation(rc_bam, wl) == "revcomp"
+
+    # neither orientation matches: fail loudly instead of silently emptying the BAM
+    bad_bam = tmp_path / "bad.bam"
+    _write_name_only_bam(bad_bam, [f"r{i}_TTTTTTTTTTTTTTTT_CGTAT_TCGGA" for i in range(10)])
+    with pytest.raises(RuntimeError, match="neither orientation"):
+        detect_tenx_orientation(bad_bam, wl)
+
+
+def test_scifi_cleanup_bam_auto_orientation(tmp_path: Path):
+    """scifi_cleanup_bam(tenx_orientation='auto') keeps forward-oriented (AVITI) barcodes."""
+    from scifi_demux.utils.scifi_cleanup import scifi_cleanup_bam
+
+    wl_path = tmp_path / "10x.txt"
+    wl_path.write_text("CGACCTTTGCTTTAGG\nAAACCCGGGTTTACGT\n")
+    tn5_path = tmp_path / "tn5.txt"
+    tn5_path.write_text("scifiv2-A1\tCGTAT\tA\nscifiv2-B1\tTCGGA\tB\n")
+
+    bam_in = tmp_path / "in.bam"
+    names = [f"r{i}_CGACCTTTGCTTTAGG_CGTAT_TCGGA" for i in range(20)]
+    _write_name_only_bam(bam_in, names, flag=0x1 | 0x2)  # paired + proper pair
+
+    counts = scifi_cleanup_bam(bam_in, tmp_path / "auto.bam", wl_path, tn5_path,
+                               min_mapq=20, threads=1, tenx_orientation="auto")
+    assert counts == (20, 20, 20)
+
+    # the legacy behaviour would have rejected every read of this library
+    _, _, pass_bc_rc = scifi_cleanup_bam(bam_in, tmp_path / "rc.bam", wl_path, tn5_path,
+                                          min_mapq=20, threads=1, tenx_orientation="revcomp")
+    assert pass_bc_rc == 0
+
+    with pytest.raises(ValueError):
+        scifi_cleanup_bam(bam_in, tmp_path / "x.bam", wl_path, tn5_path, tenx_orientation="sideways")
+
+
+# ---------------------------------------------------------------------------
+# ensure_bwa_index: an index prefix with a dot in its name (Index_Sparvula_v2.2_bwa)
+# ---------------------------------------------------------------------------
+def test_ensure_bwa_index_prefix_with_dot(tmp_path: Path):
+    """Index files must be found by appending the extension, not by Path.with_suffix."""
+    from scifi_demux.steps.step2 import ensure_bwa_index
+
+    prefix = tmp_path / "Index_Sparvula_v2.2_bwa"
+    for ext in (".amb", ".ann", ".bwt", ".pac", ".sa"):
+        Path(str(prefix) + ext).write_bytes(b"x")
+    with patch("scifi_demux.steps.step2._run") as mock_run:
+        assert ensure_bwa_index(prefix) == prefix.resolve()
+        mock_run.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
 # Sentinel cleanup race: bam_sort only deleted after bc_tag completes
 # ---------------------------------------------------------------------------
 def test_step2_cleanup_deferred_until_bc_tag(tmp_path: Path):

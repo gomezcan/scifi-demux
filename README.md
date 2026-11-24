@@ -211,14 +211,14 @@ scifi-demux step2 run --mode local \
   --dry-run
 ```
 
-Execute (remove `--dry-run` or set `--dry-run False`):
+Execute (pass `--no-dry-run`):
 ```bash
 scifi-demux step2 run --mode local \
   --sample SampleExample1 \
   --from-step1-work-root SampleExample1_work \
   --outdir 3_Mapping \
   --threads-per-task 24 \
-  --dry-run False
+  --no-dry-run
 ```
 
 ## Step 2 HPC mode — SLURM array (one task = one row)
@@ -252,7 +252,7 @@ scifi-demux step2 run --mode hpc \
   --plan run_plan.map.tsv \
   --threads-per-task 24 \
   --picard-max-heap 8g \
-  --dry-run False \
+  --no-dry-run \
   --resume
 ```
 
@@ -278,9 +278,20 @@ scifi-demux step2 run --mode hpc \
   --plan run_plan.map.tsv \
   --threads-per-task 30 \
   --picard-max-heap 96g \
-  --dry-run False \
+  --no-dry-run \
   --resume
 ```
+
+### 10x barcode orientation (`--tenx-orientation`)
+
+The cleaning step corrects the 16 bp 10x barcode in each read name against
+`737K-cratac-v1`. On Illumina runs that barcode comes from the i5 index read and is
+the reverse complement of the whitelist, which is what the code always assumed
+(`revcomp`). On Element AVITI runs the index is read in whitelist orientation
+(`forward`). The default `auto` samples the first 100k reads of each BAM, logs the
+exact-match rate in both orientations, uses the better one, and aborts if neither
+matches, so a wrong orientation can no longer silently empty the BAM. Force it with
+`--tenx-orientation forward|revcomp` on `step2 run` / `step2 sbatch`.
 
 ## Status & resume
 ```bash
@@ -293,7 +304,7 @@ scifi-demux step2 run --mode local \
   --from-step1-work-root SampleExample1_work \
   --outdir 3_Mapping \
   --threads-per-task 24 \
-  --dry-run False \
+  --no-dry-run \
   --resume
 ```
 

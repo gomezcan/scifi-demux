@@ -82,9 +82,11 @@ def ensure_bwa_index(ref_path: Path, threads: int = 4, dry_run: bool = False) ->
     ref_path = ref_path.resolve()
     prefix = _guess_bwa_index_prefix(ref_path)
 
-    # Check for existing index files (BWA standard extensions)
+    # Check for existing index files (BWA standard extensions). Appended to the prefix as a
+    # string: Path.with_suffix would replace anything after a dot in the prefix name itself
+    # (e.g. Index_Sparvula_v2.2_bwa -> Index_Sparvula_v2.bwt).
     index_exts = [".bwt", ".pac", ".ann", ".amb", ".sa"]
-    if all((prefix.with_suffix(ext)).exists() for ext in index_exts):
+    if all(Path(f"{prefix}{ext}").exists() for ext in index_exts):
         print(f"[step2] Using existing BWA index prefix: {prefix}")
         return prefix
 
@@ -208,6 +210,7 @@ def run_scifi_cleaning_pipeline(
     dry_run: bool = False,
     sent_dir: Path | None = None,
     picard_max_heap: str = "8g",
+    tenx_orientation: str = "auto",
 ) -> None:
     """
     Run the scifi-ATAC cleaning pipeline for a given base name and raw BAM.
@@ -215,7 +218,7 @@ def run_scifi_cleaning_pipeline(
     Python stage:
       - Sort BAM
       - Filter: mapped, MAPQ ≥ mapq_min, proper pairs
-      - 10x whitelist check + Tn5 1-mismatch correction
+      - 10x whitelist check (tenx_orientation: auto | forward | revcomp) + Tn5 1-mismatch correction
       - Attach BC tag, write <base>.mq{mapq_min}.BC.bam
 
     Subsequent stages:
@@ -258,7 +261,7 @@ def run_scifi_cleaning_pipeline(
                 f"[step2] DRY-RUN: would run scifi_cleanup_bam("
                 f"input_bam={bam_sort}, output_bam={bam_bc}, "
                 f"whitelist_10x={whitelist_10x}, whitelist_tn5={whitelist_tn5}, "
-                f"min_mapq={mapq_min}, threads={threads})"
+                f"min_mapq={mapq_min}, threads={threads}, tenx_orientation={tenx_orientation})"
             )
         else:
             scifi_cleanup_bam(
@@ -268,6 +271,7 @@ def run_scifi_cleaning_pipeline(
                 whitelist_tn5=whitelist_tn5,
                 min_mapq=mapq_min,
                 threads=threads,
+                tenx_orientation=tenx_orientation,
             )
             if sent_dir is not None:
                 write_ok(sent_dir / f"{base}.bc_tag", {"step": "bc_tag", "output": str(bam_bc)})
@@ -466,6 +470,7 @@ def run_step2_for_sample_genome(
     mapq_min: int = 20,
     dry_run: bool = False,
     picard_max_heap: str = "8g",
+    tenx_orientation: str = "auto",
 ) -> None:
     """
     High-level entry point for one (sample, genome) pair.
@@ -526,4 +531,5 @@ def run_step2_for_sample_genome(
         dry_run=dry_run,
         sent_dir=sent_dir,
         picard_max_heap=picard_max_heap,
+        tenx_orientation=tenx_orientation,
     )
